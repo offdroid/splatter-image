@@ -6,6 +6,7 @@ import wandb
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
+import torchvision
 
 from lightning.fabric import Fabric
 
@@ -94,6 +95,7 @@ def main(cfg: DictConfig):
                 gaussian_predictor.load_state_dict(checkpoint["model_state_dict"],
                                                 strict=False)
             best_PSNR = checkpoint["best_PSNR"] 
+            del checkpoint # Unload duplicate checkpoint data
             print('Loaded model from a pretrained checkpoint')
         else:
             best_PSNR = 0.0
@@ -177,6 +179,8 @@ def main(cfg: DictConfig):
             else:
                 focals_pixels_pred = None
                 input_images = data["gt_images"][:, :cfg.data.input_images, ...]
+            # Randomly mask images
+            input_images = torchvision.transforms.RandomErasing(p=cfg.opt.mask_p)(input_images)
 
             gaussian_splats = gaussian_predictor(input_images,
                                                 data["view_to_world_transforms"][:, :cfg.data.input_images, ...],
