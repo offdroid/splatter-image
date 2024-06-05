@@ -24,8 +24,9 @@ class NMRDataset(SharedDataset):
     Provides NMR renderings
     """
 
-    def __init__(self, cfg, 
-                 dataset_name="train"
+    def __init__(self, 
+                 dataset_name="train",
+                 with_alpha=False
                  ) -> None:
         super().__init__()
         self.cfg = cfg
@@ -134,8 +135,15 @@ class NMRDataset(SharedDataset):
         for frame_idx in indexes:
 
             rgb_path = rgb_paths[frame_idx]
-            img = PILtoTorch(Image.open(rgb_path), (self.cfg.data.training_resolution,
-                                                    self.cfg.data.training_resolution))
+            img = PILtoTorch(Image.open(rgb_path), (128,
+                                                    128))
+
+            # Take replace the last "image" in rgb_path with "mask" to get the mask path
+            mask_path = rgb_path[:rgb_path.rfind("image")] + "mask" + rgb_path[rgb_path.rfind("image") + 5:]
+            alpha_img = PILtoTorch(Image.open(mask_path), (128, 128))
+            # Extend img with alpha channel
+            if self.with_alpha:
+                img = torch.cat([img, alpha_img[0:1]], dim=0)
             imgs.append(img)
 
             # Read off extrinsic matrix
