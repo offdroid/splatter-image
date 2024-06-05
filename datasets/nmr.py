@@ -148,7 +148,10 @@ class NMRDataset(SharedDataset):
         for frame_idx in indexes:
 
             rgb_path = rgb_paths[frame_idx]
-            img = PILtoTorch(Image.open(rgb_path), (128, 128))
+            img = PILtoTorch(
+                Image.open(rgb_path),
+                (self.cfg.data.training_resolution, self.cfg.data.training_resolution),
+            )
 
             # Take replace the last "image" in rgb_path with "mask" to get the mask path
             mask_path = (
@@ -156,7 +159,10 @@ class NMRDataset(SharedDataset):
                 + "mask"
                 + rgb_path[rgb_path.rfind("image") + 5 :]
             )
-            alpha_img = PILtoTorch(Image.open(mask_path), (128, 128))
+            alpha_img = PILtoTorch(
+                Image.open(mask_path),
+                (self.cfg.data.training_resolution, self.cfg.data.training_resolution),
+            )
             # Extend img with alpha channel
             if self.with_alpha:
                 img = torch.cat([img, alpha_img[0:1]], dim=0)
