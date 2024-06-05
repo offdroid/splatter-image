@@ -7,7 +7,7 @@ def get_dataset(cfg, name):
         return CO3DDataset(cfg, name)
     elif cfg.data.category == "nmr":
         from .nmr import NMRDataset
-        return NMRDataset(cfg, name)
+        return NMRDataset(cfg, name, with_alpha=True)
     elif cfg.data.category == "objaverse":
         from .objaverse import ObjaverseDataset
         return ObjaverseDataset(cfg, name)

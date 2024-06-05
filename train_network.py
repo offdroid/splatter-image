@@ -228,27 +228,25 @@ def main(cfg: DictConfig):
             # =============== Prepare input ================
             rot_transform_quats = data["source_cv2wT_quat"][:, : cfg.data.input_images]
 
-            if cfg.data.category == "hydrants" or cfg.data.category == "teddybears":
-                focals_pixels_pred = data["focals_pixels"][
-                    :, : cfg.data.input_images, ...
-                ]
-                input_images = torch.cat(
-                    [
-                        data["gt_images"][:, : cfg.data.input_images, :3, ...],
-                        data["origin_distances"][:, : cfg.data.input_images, ...],
-                    ],
-                    dim=2,
-                )
-            else:
-                focals_pixels_pred = None
-                input_images = data["gt_images"][:, : cfg.data.input_images, :3, ...]
-                input_mask = torch.flip(
-                    mask_data["gt_images"][:, : cfg.data.input_images, :4, ...], [0]
-                )
-            prev_shape = input_images.shape
+            with torch.no_grad():
+                if cfg.data.category == "hydrants" or cfg.data.category == "teddybears":
+                    focals_pixels_pred = data["focals_pixels"][
+                        :, : cfg.data.input_images, ...
+                    ]
+                    input_images = torch.cat(
+                        [
+                            data["gt_images"][:, : cfg.data.input_images, :3, ...],
+                            data["origin_distances"][:, : cfg.data.input_images, ...],
+                        ],
+                        dim=2,
+                    )
+                else:
+                    focals_pixels_pred = None
+                    input_images = data["gt_images"][:, : cfg.data.input_images, :3, ...]
+                    input_mask = torch.flip(
+                        mask_data["gt_images"][:, : cfg.data.input_images, :4, ...], [0]
+                    )
             input_images = superimpose_mask(input_images, input_mask)
-            assert input_images.shape == prev_shape, f"{input_images.shape} != {prev_shape}"
-            print(input_images.shape)
 
             # for i in range(data["gt_images"].shape[0]):
             # torchvision.transforms.functional.to_pil_image(input_images[i, 0]).save(
@@ -337,6 +335,7 @@ def main(cfg: DictConfig):
                 )
 
             total_loss = l12_loss_sum * lambda_l12 + lpips_loss_sum * lambda_lpips
+            logging.info(f"total loss={total_loss} l12_loss_sum={l12_loss_sum} lpips_loss_sum={lpips_loss_sum}")
             if cfg.data.category == "hydrants" or cfg.data.category == "teddybears":
                 total_loss = (
                     total_loss + big_gaussian_reg_loss + small_gaussian_reg_loss

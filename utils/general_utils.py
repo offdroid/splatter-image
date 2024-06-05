@@ -235,11 +235,14 @@ def safe_state(cfg, silent=False):
     return device
 
 
+@torch.no_grad
 def superimpose_mask(input, mask):
     # input_images = torchvision.transforms.RandomErasing(p=cfg.opt.mask_p)(input_images)
     mask = torchvision.transforms.v2.RandomAffine(
         degrees=180, translate=(0.40, 0.40), scale=(0.8, 1.2)
     )(mask)
+    assert input.shape[2] == 3
+    assert mask.shape[2] == 4
     return (
         input * (1 - mask[:, :, 3:4, ...]) + mask[:, :, :3, ...] * mask[:, :, 3:4, ...]
     )
