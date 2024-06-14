@@ -14,6 +14,7 @@ import sys
 from datetime import datetime
 import numpy as np
 import random
+import typing as ty
 
 import torchvision
 import torchvision.transforms.v2
@@ -236,13 +237,46 @@ def safe_state(cfg, silent=False):
 
 
 @torch.no_grad
-def superimpose_mask(input, mask):
-    # input_images = torchvision.transforms.RandomErasing(p=cfg.opt.mask_p)(input_images)
-    mask = torchvision.transforms.v2.RandomAffine(
+def superimpose_overlay(
+    view: torch.Tensor,
+    overlay: torch.Tensor,
+    max_tries: int = 10,
+    limits: ty.Optional[ty.Tuple[int, int]] = None,
+):
+    if limits is None:
+        limits = (0.5, 0.7)
+    assert view.shape == overlay.shape, f"view {view.shape} != overlay {overlay.shape}"
+    assert view.shape[2] == 4
+    assert max_tries >= 1
+    transformer = torchvision.transforms.v2.RandomAffine(
         degrees=180, translate=(0.40, 0.40), scale=(0.8, 1.2)
-    )(mask)
-    assert input.shape[2] == 3
-    assert mask.shape[2] == 4
-    return (
-        input * (1 - mask[:, :, 3:4, ...]) + mask[:, :, :3, ...] * mask[:, :, 3:4, ...]
     )
+
+    # Channels, i.e., dimension 3, are RGBA
+    # `x[:, :, :3, ...]` extracts the RGB channels from `x`
+    # `x[:, :, 3:4, ...]` extracts the alpah channel from `x`
+    LO = torch.tensor(limits[0], device=view.device)
+    HI = torch.tensor(limits[1], device=view.device)
+    cond = torch.ones(view.shape[0], dtype=torch.bool, device=view.device)
+    overlay_ = torch.empty_like(overlay)
+    mask = torch.empty(
+        [view.shape[0], view.shape[1], 1, view.shape[3], view.shape[4]],
+        dtype=torch.bool,
+        device=view.device,
+    )
+
+    for it in range(max_tries):
+        overlay_[cond] = transformer(overlay[cond])
+        mask[cond] = (view[cond][:, :, 3:4, ...] - overlay_[cond][:, :, 3:4, ...]) > 0
+        cond = torch.sum(mask, dim=(1, 2, 3, 4)) / torch.sum(
+            view[:, :, 3:4, ...] > 0, dim=(1, 2, 3, 4)
+        )
+        cond = torch.le(torch.le(LO, cond), HI)
+        if torch.all(cond):
+            break
+
+    rgb = (
+        view[:, :, :3, ...] * (1 - overlay_[:, :, 3:4, ...])
+        + overlay_[:, :, :3, ...] * overlay_[:, :, 3:4, ...]
+    )
+    return torch.cat([rgb, mask.float()], dim=2)

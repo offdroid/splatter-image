@@ -434,10 +434,10 @@ class SingleImageSongUNetPredictor(nn.Module):
         self.out_channels = out_channels
         self.cfg = cfg
         if cfg.cam_embd.embedding is None:
-            in_channels = 3
+            in_channels = 4
             emb_dim_in = 0
         else:
-            in_channels = 3
+            in_channels = 4
             emb_dim_in = 6 * cfg.cam_embd.dimension
 
         self.encoder = SongUNet(cfg.data.training_resolution, 

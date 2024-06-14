@@ -14,7 +14,7 @@ from lightning.fabric import Fabric
 from ema_pytorch import EMA
 from omegaconf import DictConfig, OmegaConf
 
-from utils.general_utils import safe_state, superimpose_mask
+from utils.general_utils import safe_state, superimpose_overlay
 from utils.loss_utils import l1_loss, l2_loss
 import lpips as lpips_lib
 
@@ -147,7 +147,7 @@ def main(cfg: DictConfig):
     background = fabric.to_device(background)
 
     if cfg.data.category in ["nmr", "objaverse"]:
-        num_workers = 12
+        num_workers = 2
         persistent_workers = True
     else:
         num_workers = 0
@@ -202,9 +202,10 @@ def main(cfg: DictConfig):
     # distribute model and training dataset
     gaussian_predictor, optimizer = fabric.setup(gaussian_predictor, optimizer)
     dataloader = fabric.setup_dataloaders(dataloader)
-    dataloader_mask = iter(fabric.setup_dataloaders(dataloader_mask))
+    dataloader_mask = fabric.setup_dataloaders(dataloader_mask)
 
     gaussian_predictor.train()
+    print(f"Training dataset size = {len(dataloader)}")
 
     print("Beginning training")
     first_iter += 1
@@ -215,13 +216,14 @@ def main(cfg: DictConfig):
     ):
         dataloader.sampler.set_epoch(num_epoch)
 
+        mask_iter = iter(dataloader_mask)
         for data in dataloader:
-            mask_data = next(dataloader_mask)
+            mask_data = next(mask_iter)
             iteration += 1
 
             print(
-                "starting iteration {} on process {}".format(
-                    iteration, fabric.global_rank
+                "starting iteration {} -> {} on process {}".format(
+                    iteration, iteration / cfg.opt.iterations, fabric.global_rank
                 )
             )
 
@@ -230,28 +232,24 @@ def main(cfg: DictConfig):
 
             with torch.no_grad():
                 if cfg.data.category == "hydrants" or cfg.data.category == "teddybears":
+                    assert False
                     focals_pixels_pred = data["focals_pixels"][
                         :, : cfg.data.input_images, ...
                     ]
                     input_images = torch.cat(
                         [
-                            data["gt_images"][:, : cfg.data.input_images, :3, ...],
+                            data["gt_images"][:, : cfg.data.input_images, ...],
                             data["origin_distances"][:, : cfg.data.input_images, ...],
                         ],
                         dim=2,
                     )
                 else:
                     focals_pixels_pred = None
-                    input_images = data["gt_images"][:, : cfg.data.input_images, :3, ...]
+                    input_images = data["gt_images"][:, : cfg.data.input_images, ...]
                     input_mask = torch.flip(
-                        mask_data["gt_images"][:, : cfg.data.input_images, :4, ...], [0]
+                        mask_data["gt_images"][:, : cfg.data.input_images, ...], [0]
                     )
-            input_images = superimpose_mask(input_images, input_mask)
-
-            # for i in range(data["gt_images"].shape[0]):
-            # torchvision.transforms.functional.to_pil_image(input_images[i, 0]).save(
-            # f"/tmp/img{i}.png"
-            #    )
+                    input_images = superimpose_overlay(input_images, input_mask)
 
             gaussian_splats = gaussian_predictor(
                 input_images,
@@ -261,6 +259,7 @@ def main(cfg: DictConfig):
             )
 
             if cfg.data.category == "hydrants" or cfg.data.category == "teddybears":
+                assert False
                 # regularize very big gaussians
                 if len(torch.where(gaussian_splats["scaling"] > 20)[0]) > 0:
                     big_gaussian_reg_loss = torch.mean(
@@ -324,6 +323,7 @@ def main(cfg: DictConfig):
                     # Put in a list for a later loss computation
                     rendered_images.append(image)
                     gt_image = data["gt_images"][b_idx, r_idx, :3]
+                    input_image = input_images[b_idx, 0, ...]
                     gt_images.append(gt_image)
             rendered_images = torch.stack(rendered_images, dim=0)
             gt_images = torch.stack(gt_images, dim=0)
@@ -335,16 +335,16 @@ def main(cfg: DictConfig):
                 )
 
             total_loss = l12_loss_sum * lambda_l12 + lpips_loss_sum * lambda_lpips
-            logging.info(f"total loss={total_loss} l12_loss_sum={l12_loss_sum} lpips_loss_sum={lpips_loss_sum}")
             if cfg.data.category == "hydrants" or cfg.data.category == "teddybears":
+                assert False
                 total_loss = (
                     total_loss + big_gaussian_reg_loss + small_gaussian_reg_loss
                 )
 
             assert not total_loss.isnan(), "Found NaN loss!"
             print(
-                "finished forward {} on process {}".format(
-                    iteration, fabric.global_rank
+                "finished forward {} ({}) on process {}".format(
+                    iteration, iteration / cfg.opt.iterations, fabric.global_rank
                 )
             )
             fabric.backward(total_loss)
@@ -352,14 +352,18 @@ def main(cfg: DictConfig):
             # ============ Optimization ===============
             optimizer.step()
             optimizer.zero_grad()
-            print("finished opt {} on process {}".format(iteration, fabric.global_rank))
+            print(
+                "finished opt {} ({}) on process {}".format(
+                    iteration, iteration / cfg.opt.iterations, fabric.global_rank
+                )
+            )
 
             if cfg.opt.ema.use and fabric.is_global_zero:
                 ema.update()
 
             print(
-                "finished iteration {} on process {}".format(
-                    iteration, fabric.global_rank
+                "finished iteration {} ({}) on process {}".format(
+                    iteration, iteration / cfg.opt.iterations, fabric.global_rank
                 )
             )
 
@@ -423,6 +427,30 @@ def main(cfg: DictConfig):
                     )
                     wandb.log(
                         {
+                            "occluded_input": wandb.Image(
+                                input_image[:3, ...]
+                                .permute(1, 2, 0)
+                                .detach()
+                                .cpu()
+                                .numpy()
+                            )
+                        },
+                        step=iteration,
+                    )
+                    wandb.log(
+                        {
+                            "mask": wandb.Image(
+                                input_image[3:4, ...]
+                                .permute(1, 2, 0)
+                                .detach()
+                                .cpu()
+                                .numpy()
+                            )
+                        },
+                        step=iteration,
+                    )
+                    wandb.log(
+                        {
                             "gt": wandb.Image(
                                 gt_image.permute(1, 2, 0).detach().cpu().numpy()
                             )
@@ -460,14 +488,13 @@ def main(cfg: DictConfig):
                         cfg.data.category == "hydrants"
                         or cfg.data.category == "teddybears"
                     ):
+                        assert False
                         focals_pixels_pred = vis_data["focals_pixels"][
                             :, : cfg.data.input_images, ...
                         ]
                         input_images = torch.cat(
                             [
-                                vis_data["gt_images"][
-                                    :, : cfg.data.input_images, :3, ...
-                                ],
+                                vis_data["gt_images"][:, : cfg.data.input_images, ...],
                                 vis_data["origin_distances"][
                                     :, : cfg.data.input_images, ...
                                 ],
@@ -476,14 +503,12 @@ def main(cfg: DictConfig):
                         )
                     else:
                         focals_pixels_pred = None
-                        input_images = vis_data["gt_images"][
-                            :, : cfg.data.input_images, :3, ...
-                        ]
+                        input_images = vis_data["gt_images"][:, : cfg.data.input_images]
                         input_mask = torch.flip(
-                            mask_data["gt_images"][:, : cfg.data.input_images, :4, ...],
+                            vis_data_mask["gt_images"][:, : cfg.data.input_images],
                             [0],
                         )
-                        input_images = superimpose_mask(input_images, input_mask)
+                        input_images = superimpose_overlay(input_images, input_mask)
 
                     gaussian_splats_vis = gaussian_predictor(
                         input_images,

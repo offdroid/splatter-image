@@ -18,7 +18,7 @@ from gaussian_renderer import render_predicted
 from scene.gaussian_predictor import GaussianSplatPredictor
 from datasets.dataset_factory import get_dataset
 from utils.loss_utils import ssim as ssim_fn
-from utils.general_utils import superimpose_mask
+from utils.general_utils import superimpose_overlay
 
 
 class Metricator:
@@ -104,9 +104,9 @@ def evaluate_dataset(
                 dim=2,
             )
         else:
-            input_images = data["gt_images"][:, : model_cfg.data.input_images, :3, ...]
+            input_images = data["gt_images"][:, : model_cfg.data.input_images, ...]
             input_mask = torch.flip(
-                mask_data["gt_images"][:, : cfg.data.input_images, :4, ...], [0]
+                mask_data["gt_images"][:, : model_cfg.data.input_images, ...], [0]
             )
 
         example_id = dataloader.dataset.get_example_id(d_idx)
@@ -120,7 +120,7 @@ def evaluate_dataset(
             os.makedirs(out_example_gt, exist_ok=True)
             os.makedirs(out_example, exist_ok=True)
 
-        input_images = superimpose_mask(input_images, input_mask)
+        input_images = superimpose_overlay(input_images, input_mask)
         # batch has length 1, the first image is conditioning
         reconstruction = model(
             input_images,
@@ -150,14 +150,14 @@ def evaluate_dataset(
                     image, os.path.join(out_example, "{0:05d}".format(r_idx) + ".png")
                 )
                 torchvision.utils.save_image(
-                    data["gt_images"][0, r_idx, ...],
+                    data["gt_images"][0, r_idx, :3, ...],
                     os.path.join(out_example_gt, "{0:05d}".format(r_idx) + ".png"),
                 )
 
             # exclude non-foreground images from metric computation
-            if not torch.all(data["gt_images"][0, r_idx, ...] == 0):
+            if not torch.all(data["gt_images"][0, r_idx, :3, ...] == 0):
                 psnr, ssim, lpips = metricator.compute_metrics(
-                    image, data["gt_images"][0, r_idx, ...]
+                    image, data["gt_images"][0, r_idx, :3, ...]
                 )
                 if r_idx < model_cfg.data.input_images:
                     psnr_all_renders_cond.append(psnr)
