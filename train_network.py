@@ -6,7 +6,6 @@ import wandb
 import numpy as np
 import torch
 from torch.utils.data import DataLoader
-import torchvision
 import torchvision.transforms.v2
 
 from lightning.fabric import Fabric
@@ -14,7 +13,7 @@ from lightning.fabric import Fabric
 from ema_pytorch import EMA
 from omegaconf import DictConfig, OmegaConf
 
-from utils.general_utils import safe_state, superimpose_overlay
+from utils.general_utils import safe_state
 from utils.loss_utils import l1_loss, l2_loss
 import lpips as lpips_lib
 
@@ -22,6 +21,7 @@ from eval import evaluate_dataset
 from gaussian_renderer import render_predicted
 from scene.gaussian_predictor import GaussianSplatPredictor
 from datasets.dataset_factory import get_dataset
+from datasets.shared_dataset import MaskedDataset
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="default_config")
@@ -153,25 +153,17 @@ def main(cfg: DictConfig):
         num_workers = 0
         persistent_workers = False
 
-    dataset = get_dataset(cfg, "train")
+    dataset = MaskedDataset(cfg, get_dataset(cfg, "train"))
     dataloader = DataLoader(
         dataset,
         batch_size=cfg.opt.batch_size,
         shuffle=True,
         num_workers=num_workers,
         persistent_workers=persistent_workers,
-    )
-    # Should be shuffled differently from the first dataloader
-    dataloader_mask = DataLoader(
-        dataset,
-        batch_size=cfg.opt.batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        persistent_workers=persistent_workers,
-        worker_init_fn=lambda id: np.random.seed(id + num_epoch * num_workers),
+        prefetch_factor=2,
     )
 
-    val_dataset = get_dataset(cfg, "val")
+    val_dataset = MaskedDataset(cfg, get_dataset(cfg, "val"))
     val_dataloader = DataLoader(
         val_dataset,
         batch_size=1,
@@ -179,30 +171,15 @@ def main(cfg: DictConfig):
         num_workers=1,
         persistent_workers=True,
         pin_memory=True,
-    )
-    val_dataloader_mask = DataLoader(
-        val_dataset,
-        batch_size=1,
-        shuffle=False,
-        num_workers=1,
-        persistent_workers=True,
-        pin_memory=True,
-        worker_init_fn=lambda id: np.random.seed(id + num_epoch * num_workers),
+        prefetch_factor=2,
     )
 
     test_dataset = get_dataset(cfg, "vis")
     test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=True)
-    test_dataloader_mask = DataLoader(
-        test_dataset,
-        batch_size=1,
-        shuffle=True,
-        worker_init_fn=lambda id: np.random.seed(id + num_epoch * num_workers),
-    )
 
     # distribute model and training dataset
     gaussian_predictor, optimizer = fabric.setup(gaussian_predictor, optimizer)
     dataloader = fabric.setup_dataloaders(dataloader)
-    dataloader_mask = fabric.setup_dataloaders(dataloader_mask)
 
     gaussian_predictor.train()
     print(f"Training dataset size = {len(dataloader)}")
@@ -216,9 +193,7 @@ def main(cfg: DictConfig):
     ):
         dataloader.sampler.set_epoch(num_epoch)
 
-        mask_iter = iter(dataloader_mask)
-        for data in dataloader:
-            mask_data = next(mask_iter)
+        for data, _, input_data in dataloader:
             iteration += 1
 
             print(
@@ -245,11 +220,7 @@ def main(cfg: DictConfig):
                     )
                 else:
                     focals_pixels_pred = None
-                    input_images = data["gt_images"][:, : cfg.data.input_images, ...]
-                    input_mask = torch.flip(
-                        mask_data["gt_images"][:, : cfg.data.input_images, ...], [0]
-                    )
-                    input_images = superimpose_overlay(input_images, input_mask)
+                    input_images = input_data
 
             gaussian_splats = gaussian_predictor(
                 input_images,
@@ -462,23 +433,16 @@ def main(cfg: DictConfig):
                 ) and fabric.is_global_zero:
                     # torch.cuda.empty_cache()
                     try:
-                        vis_data = next(test_iterator)
-                        vis_data_mask = next(test_iterator_mask)
+                        vis_data, _, vis_input_data = next(test_iterator)
                     except UnboundLocalError:
                         test_iterator = iter(test_dataloader)
-                        test_iterator_mask = iter(test_dataloader_mask)
                         vis_data = next(test_iterator)
-                        vis_data_mask = next(test_iterator_mask)
                     except StopIteration or UnboundLocalError:
                         test_iterator = iter(test_dataloader)
-                        test_iterator_mask = iter(test_dataloader_mask)
                         vis_data = next(test_iterator)
-                        vis_data_mask = next(test_iterator_mask)
 
                     vis_data = {k: fabric.to_device(v) for k, v in vis_data.items()}
-                    vis_data_mask = {
-                        k: fabric.to_device(v) for k, v in vis_data_mask.items()
-                    }
+                    vis_input_data = fabric.to_device(vis_input_data)
 
                     rot_transform_quats = vis_data["source_cv2wT_quat"][
                         :, : cfg.data.input_images
@@ -503,12 +467,7 @@ def main(cfg: DictConfig):
                         )
                     else:
                         focals_pixels_pred = None
-                        input_images = vis_data["gt_images"][:, : cfg.data.input_images]
-                        input_mask = torch.flip(
-                            vis_data_mask["gt_images"][:, : cfg.data.input_images],
-                            [0],
-                        )
-                        input_images = superimpose_overlay(input_images, input_mask)
+                        input_images = vis_input_data
 
                     gaussian_splats_vis = gaussian_predictor(
                         input_images,
@@ -588,7 +547,6 @@ def main(cfg: DictConfig):
                     scores = evaluate_dataset(
                         ema,
                         val_dataloader,
-                        val_dataloader_mask,
                         device=device,
                         model_cfg=cfg,
                     )
@@ -596,7 +554,6 @@ def main(cfg: DictConfig):
                     scores = evaluate_dataset(
                         gaussian_predictor,
                         val_dataloader,
-                        val_dataloader_mask,
                         device=device,
                         model_cfg=cfg,
                     )

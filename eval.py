@@ -12,13 +12,14 @@ import lpips as lpips_lib
 import torch
 import torchvision
 from torchvision import transforms
-from torch.utils.data import DataLoader
+import numpy as np
+from torch.utils.data import DataLoader, RandomSampler
 
 from gaussian_renderer import render_predicted
 from scene.gaussian_predictor import GaussianSplatPredictor
 from datasets.dataset_factory import get_dataset
 from utils.loss_utils import ssim as ssim_fn
-from utils.general_utils import superimpose_overlay
+from datasets.shared_dataset import MaskedDataset
 
 
 class Metricator:
@@ -38,7 +39,12 @@ class Metricator:
 
 @torch.no_grad()
 def evaluate_dataset(
-    model, dataloader, mask_dataloader, device, model_cfg, save_vis=0, out_folder=None
+    model,
+    dataloader: MaskedDataset,
+    device,
+    model_cfg,
+    save_vis=0,
+    out_folder=None,
 ):
     """
     Runs evaluation on the dataset passed in the dataloader.
@@ -68,8 +74,7 @@ def evaluate_dataset(
     ssim_all_examples_cond = []
     lpips_all_examples_cond = []
 
-    mask_iter = iter(mask_dataloader)
-    for d_idx, data in enumerate(tqdm.tqdm(dataloader)):
+    for d_idx, (data, _, input_data) in enumerate(tqdm.tqdm(dataloader)):
 
         psnr_all_renders_novel = []
         ssim_all_renders_novel = []
@@ -79,7 +84,7 @@ def evaluate_dataset(
         lpips_all_renders_cond = []
 
         data = {k: v.to(device) for k, v in data.items()}
-        mask_data = {k: v.to(device) for k, v in next(mask_iter).items()}
+        input_data = input_data.to(device)
 
         rot_transform_quats = data["source_cv2wT_quat"][
             :, : model_cfg.data.input_images
@@ -96,17 +101,13 @@ def evaluate_dataset(
             focals_pixels_pred = None
 
         if model_cfg.data.origin_distances:
+            assert False
             input_images = torch.cat(
                 [
                     data["gt_images"][:, : model_cfg.data.input_images, ...],
                     data["origin_distances"][:, : model_cfg.data.input_images, ...],
                 ],
                 dim=2,
-            )
-        else:
-            input_images = data["gt_images"][:, : model_cfg.data.input_images, ...]
-            input_mask = torch.flip(
-                mask_data["gt_images"][:, : model_cfg.data.input_images, ...], [0]
             )
 
         example_id = dataloader.dataset.get_example_id(d_idx)
@@ -120,7 +121,7 @@ def evaluate_dataset(
             os.makedirs(out_example_gt, exist_ok=True)
             os.makedirs(out_example, exist_ok=True)
 
-        input_images = superimpose_overlay(input_images, input_mask)
+        input_images = input_data
         # batch has length 1, the first image is conditioning
         reconstruction = model(
             input_images,
@@ -146,6 +147,11 @@ def evaluate_dataset(
 
             if d_idx < save_vis:
                 # vis_image_preds(reconstruction, out_example)
+                if r_idx == 0:
+                    torchvision.utils.save_image(
+                        input_images[0, 0, :3, ...],
+                        os.path.join(out_example, "_input".format(r_idx) + ".png"),
+                    )
                 torchvision.utils.save_image(
                     image, os.path.join(out_example, "{0:05d}".format(r_idx) + ".png")
                 )
@@ -371,7 +377,7 @@ def main(
     if training_cfg.data.category == "objaverse" and split in ["test", "vis"]:
         training_cfg.data.category = "gso"
     # instantiate dataset loader
-    dataset = get_dataset(training_cfg, split)
+    dataset = MaskedDataset(training_cfg, get_dataset(training_cfg, split))
     dataloader = DataLoader(
         dataset,
         batch_size=1,
@@ -379,6 +385,7 @@ def main(
         persistent_workers=True,
         pin_memory=True,
         num_workers=1,
+        sampler=RandomSampler(dataset),
     )
 
     scores = evaluate_dataset(
