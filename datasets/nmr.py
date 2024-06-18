@@ -1,17 +1,18 @@
+import glob
 import os
 import shutil
 import subprocess
 import tempfile
-import torch
-import torch.nn.functional as F
-import glob
-from PIL import Image
-import numpy as np
 import zipfile
 
+import numpy as np
+import torch
+import torch.nn.functional as F
+from PIL import Image
+
+from utils.camera_utils import get_loop_cameras
 from utils.general_utils import PILtoTorch
 from utils.graphics_utils import getProjectionMatrix
-from utils.camera_utils import get_loop_cameras
 
 from .shared_dataset import SharedDataset
 
@@ -324,5 +325,4 @@ class NMRDataset(SharedDataset):
         images_and_camera_poses["source_cv2wT_quat"] = self.get_source_cw2wT(
             images_and_camera_poses["view_to_world_transforms"]
         )
-
         return images_and_camera_poses

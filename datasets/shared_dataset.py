@@ -1,6 +1,7 @@
+import os
+
 import torch
 from torch.utils.data import Dataset
-import os
 
 from utils.general_utils import matrix_to_quaternion, superimpose_overlay
 
@@ -49,9 +50,10 @@ class SharedDataset(Dataset):
 
 
 class MaskedDataset(SharedDataset):
-    def __init__(self, cfg, dataset) -> None:
+    def __init__(self, cfg, dataset, return_superimposed_input=False) -> None:
         super().__init__()
         self.cfg = cfg
+        self._ret_input_data = return_superimposed_input
 
         self.data = dataset
         self.reshuffle()
@@ -69,14 +71,17 @@ class MaskedDataset(SharedDataset):
         object_data = self.data[index]
         overlay_data = self.data[self.overlay_map[index]]
 
-        if len(object_data["gt_images"].shape) == 4:
-            input_data = superimpose_overlay(
-                object_data["gt_images"][None, : self.cfg.data.input_images, ...],
-                overlay_data["gt_images"][None, : self.cfg.data.input_images, ...],
-            )[0, ...]
+        if self._ret_input_data:
+            if len(object_data["gt_images"].shape) == 4:
+                input_data = superimpose_overlay(
+                    object_data["gt_images"][None, : self.cfg.data.input_images, ...],
+                    overlay_data["gt_images"][None, : self.cfg.data.input_images, ...],
+                )[0, ...]
+            else:
+                input_data = superimpose_overlay(
+                    object_data["gt_images"][:, : self.cfg.data.input_images, ...],
+                    overlay_data["gt_images"][:, : self.cfg.data.input_images, ...],
+                )
+            return object_data, overlay_data, input_data
         else:
-            input_data = superimpose_overlay(
-                object_data["gt_images"][:, : self.cfg.data.input_images, ...],
-                overlay_data["gt_images"][:, : self.cfg.data.input_images, ...],
-            )
-        return object_data, overlay_data, input_data
+            return object_data, overlay_data

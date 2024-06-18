@@ -1,27 +1,25 @@
 import glob
-import hydra
 import os
-import wandb
+from functools import partial
 
+import hydra
+import lpips as lpips_lib
 import numpy as np
 import torch
-from torch.utils.data import DataLoader
 import torchvision.transforms.v2
-
-from lightning.fabric import Fabric
-
 from ema_pytorch import EMA
+from lightning.fabric import Fabric
 from omegaconf import DictConfig, OmegaConf
+from torch.utils.data import DataLoader
 
-from utils.general_utils import safe_state
-from utils.loss_utils import l1_loss, l2_loss
-import lpips as lpips_lib
-
+import wandb
+from datasets.dataset_factory import get_dataset
+from datasets.shared_dataset import MaskedDataset
 from eval import evaluate_dataset
 from gaussian_renderer import render_predicted
 from scene.gaussian_predictor import GaussianSplatPredictor
-from datasets.dataset_factory import get_dataset
-from datasets.shared_dataset import MaskedDataset
+from utils.general_utils import collate_and_superimpose, safe_state
+from utils.loss_utils import l1_loss, l2_loss
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="default_config")
@@ -161,9 +159,10 @@ def main(cfg: DictConfig):
         num_workers=num_workers,
         persistent_workers=persistent_workers,
         prefetch_factor=2,
+        collate_fn=partial(collate_and_superimpose, cfg.data.input_images, 200),
     )
 
-    val_dataset = MaskedDataset(cfg, get_dataset(cfg, "val"))
+    val_dataset = MaskedDataset(cfg, get_dataset(cfg, "val"), return_superimposed_input=True)
     val_dataloader = DataLoader(
         val_dataset,
         batch_size=1,

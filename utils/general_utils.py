@@ -9,15 +9,16 @@
 # For inquiries contact  george.drettakis@inria.fr
 #
 
-import torch
-import sys
-from datetime import datetime
-import numpy as np
 import random
+import sys
 import typing as ty
+from datetime import datetime
 
+import numpy as np
+import torch
 import torchvision
 import torchvision.transforms.v2
+from torch.utils.data import default_collate
 
 
 def inverse_sigmoid(x):
@@ -240,14 +241,16 @@ def safe_state(cfg, silent=False):
 def superimpose_overlay(
     view: torch.Tensor,
     overlay: torch.Tensor,
-    max_tries: int = 10,
+    max_tries: int = 1,
     limits: ty.Optional[ty.Tuple[int, int]] = None,
 ):
     if limits is None:
+        # How much of the object in view is visible
         limits = (0.5, 0.7)
     assert view.shape == overlay.shape, f"view {view.shape} != overlay {overlay.shape}"
     assert view.shape[2] == 4
     assert max_tries >= 1
+
     transformer = torchvision.transforms.v2.RandomAffine(
         degrees=180, translate=(0.40, 0.40), scale=(0.8, 1.2)
     )
@@ -257,7 +260,7 @@ def superimpose_overlay(
     # `x[:, :, 3:4, ...]` extracts the alpah channel from `x`
     LO = torch.tensor(limits[0], device=view.device)
     HI = torch.tensor(limits[1], device=view.device)
-    cond = torch.ones(view.shape[0], dtype=torch.bool, device=view.device)
+    cond = torch.zeros(view.shape[0], dtype=torch.bool, device=view.device)
     overlay_ = torch.empty_like(overlay)
     mask = torch.empty(
         [view.shape[0], view.shape[1], 1, view.shape[3], view.shape[4]],
@@ -265,18 +268,23 @@ def superimpose_overlay(
         device=view.device,
     )
 
-    for it in range(max_tries):
+    for _ in range(max_tries):
+        cond = torch.bitwise_not(cond)
         overlay_[cond] = transformer(overlay[cond])
         mask[cond] = (view[cond][:, :, 3:4, ...] - overlay_[cond][:, :, 3:4, ...]) > 0
         cond = torch.sum(mask, dim=(1, 2, 3, 4)) / torch.sum(
             view[:, :, 3:4, ...] > 0, dim=(1, 2, 3, 4)
         )
-        cond = torch.le(torch.le(LO, cond), HI)
+        cond = torch.bitwise_and(torch.less_equal(LO, cond), torch.less_equal(cond, HI))
         if torch.all(cond):
             break
-
+    #print(torch.sum(mask, dim=(1, 2, 3, 4)) / torch.sum( view[:, :, 3:4, ...] > 0, dim=(1, 2, 3, 4)))
     rgb = (
         view[:, :, :3, ...] * (1 - overlay_[:, :, 3:4, ...])
         + overlay_[:, :, :3, ...] * overlay_[:, :, 3:4, ...]
     )
     return torch.cat([rgb, mask.float()], dim=2)
+
+def collate_and_superimpose(input_images: int, max_tries: int, *args):
+    view, overlay = default_collate(*args)
+    return view, overlay, superimpose_overlay(view["gt_images"][:, : input_images, ...], overlay["gt_images"][:, : input_images, ...], max_tries=max_tries)

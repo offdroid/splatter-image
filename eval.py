@@ -2,24 +2,23 @@ import argparse
 import json
 import os
 import sys
-import tqdm
-from omegaconf import OmegaConf
-
-from huggingface_hub import hf_hub_download
 
 import lpips as lpips_lib
-
+import numpy as np
 import torch
 import torchvision
-from torchvision import transforms
-import numpy as np
+import tqdm
+from huggingface_hub import hf_hub_download
+from omegaconf import OmegaConf
 from torch.utils.data import DataLoader, RandomSampler
+from torchvision import transforms
 
+from datasets.dataset_factory import get_dataset
+from datasets.shared_dataset import MaskedDataset
 from gaussian_renderer import render_predicted
 from scene.gaussian_predictor import GaussianSplatPredictor
-from datasets.dataset_factory import get_dataset
+from utils.general_utils import collate_and_superimpose
 from utils.loss_utils import ssim as ssim_fn
-from datasets.shared_dataset import MaskedDataset
 
 
 class Metricator:
@@ -377,7 +376,7 @@ def main(
     if training_cfg.data.category == "objaverse" and split in ["test", "vis"]:
         training_cfg.data.category = "gso"
     # instantiate dataset loader
-    dataset = MaskedDataset(training_cfg, get_dataset(training_cfg, split))
+    dataset = MaskedDataset(training_cfg, get_dataset(training_cfg, split), return_superimposed_input=True)
     dataloader = DataLoader(
         dataset,
         batch_size=1,
