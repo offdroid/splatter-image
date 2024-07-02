@@ -289,6 +289,11 @@ def collate_and_superimpose(input_images: int, max_tries: int, *args):
     view, overlay = default_collate(*args)
     return view, overlay, superimpose_overlay(view["gt_images"][:, : input_images, ...], overlay["gt_images"][:, : input_images, ...], max_tries=max_tries)
 
+def mask_to_outline(mask):
+    return torchvision.transforms.GaussianBlur(kernel_size=21, sigma=3.0)(mask) - mask
+
+def occluded_area(a, b):
+    return a / 255.0 * b / 255.0
 
 def adjust_channels(cfg, xs):
     if cfg.model.input_channels == 3 and hasattr(cfg.data, "erase_occlusion") and cfg.data.erase_occlusion:

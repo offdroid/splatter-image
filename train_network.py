@@ -206,7 +206,7 @@ def main(cfg: DictConfig):
     ):
         dataloader.sampler.set_epoch(num_epoch)
 
-        for data, _, input_data in dataloader:
+        for data, overlay_data, input_data in dataloader:
             iteration += 1
 
             print(
@@ -221,16 +221,6 @@ def main(cfg: DictConfig):
             with torch.no_grad():
                 if cfg.data.category == "hydrants" or cfg.data.category == "teddybears":
                     assert False
-                    focals_pixels_pred = data["focals_pixels"][
-                        :, : cfg.data.input_images, ...
-                    ]
-                    input_images = torch.cat(
-                        [
-                            data["gt_images"][:, : cfg.data.input_images, ...],
-                            data["origin_distances"][:, : cfg.data.input_images, ...],
-                        ],
-                        dim=2,
-                    )
                 else:
                     focals_pixels_pred = None
                     input_images = input_data #torch.cat(
@@ -253,45 +243,12 @@ def main(cfg: DictConfig):
 
             if cfg.data.category == "hydrants" or cfg.data.category == "teddybears":
                 assert False
-                # regularize very big gaussians
-                if len(torch.where(gaussian_splats["scaling"] > 20)[0]) > 0:
-                    big_gaussian_reg_loss = torch.mean(
-                        gaussian_splats["scaling"][
-                            torch.where(gaussian_splats["scaling"] > 20)
-                        ]
-                        * 0.1
-                    )
-                    print(
-                        "Regularising {} big Gaussians on iteration {}".format(
-                            len(torch.where(gaussian_splats["scaling"] > 20)[0]),
-                            iteration,
-                        )
-                    )
-                else:
-                    big_gaussian_reg_loss = 0.0
-                # regularize very small Gaussians
-                if len(torch.where(gaussian_splats["scaling"] < 1e-5)[0]) > 0:
-                    small_gaussian_reg_loss = torch.mean(
-                        -torch.log(
-                            gaussian_splats["scaling"][
-                                torch.where(gaussian_splats["scaling"] < 1e-5)
-                            ]
-                        )
-                        * 0.1
-                    )
-                    print(
-                        "Regularising {} small Gaussians on iteration {}".format(
-                            len(torch.where(gaussian_splats["scaling"] < 1e-5)[0]),
-                            iteration,
-                        )
-                    )
-                else:
-                    small_gaussian_reg_loss = 0.0
             # Render
             l12_loss_sum = 0.0
             lpips_loss_sum = 0.0
             rendered_images = []
             gt_images = []
+            loss_weight = []
             for b_idx in range(data["gt_images"].shape[0]):
                 # image at index 0 is training, remaining images are targets
                 # Rendering is done sequentially because gaussian rasterization code
@@ -313,15 +270,23 @@ def main(cfg: DictConfig):
                         cfg,
                         focals_pixels=focals_pixels_render,
                     )["render"]
+                    if r_idx == 0:
+                        # Input image
+                        lw_occluded_area = occluded_area(data["gt_images"][b_idx, r_idx, 3], overlay_data["gt_images"][b_idx, r_idx, 3])
+                        lw_outline = mask_to_outline(input_images[b_idx, 0, 0])
+                        lw = 1.0 + (lw_occluded_area + lw_outline) / 2 * 0.1
+                    else:
+                        lw = torch.ones(())
                     # Put in a list for a later loss computation
                     rendered_images.append(image)
+                    loss_weight.append(lw)
                     gt_image = data["gt_images"][b_idx, r_idx, :3]
-                    input_image = input_images[b_idx, 0, ...]
                     gt_images.append(gt_image)
+                    input_image = input_images[b_idx, 0, ...]
             rendered_images = torch.stack(rendered_images, dim=0)
             gt_images = torch.stack(gt_images, dim=0)
             # Loss computation
-            l12_loss_sum = loss_fn(rendered_images, gt_images)
+            l12_loss_sum = loss_fn(rendered_images, gt_images, loss_weight)
             if cfg.opt.lambda_lpips != 0:
                 lpips_loss_sum = torch.mean(
                     lpips_fn(rendered_images * 2 - 1, gt_images * 2 - 1),
@@ -330,9 +295,6 @@ def main(cfg: DictConfig):
             total_loss = l12_loss_sum * lambda_l12 + lpips_loss_sum * lambda_lpips
             if cfg.data.category == "hydrants" or cfg.data.category == "teddybears":
                 assert False
-                total_loss = (
-                    total_loss + big_gaussian_reg_loss + small_gaussian_reg_loss
-                )
 
             assert not total_loss.isnan(), "Found NaN loss!"
             print(

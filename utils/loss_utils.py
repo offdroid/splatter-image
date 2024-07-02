@@ -14,11 +14,17 @@ import torch.nn.functional as F
 from torch.autograd import Variable
 from math import exp
 
-def l1_loss(network_output, gt):
-    return torch.abs((network_output - gt)).mean()
+def l1_loss(network_output, gt, weight=None):
+    if weight:
+        return torch.abs((network_output - gt) * weight).mean()
+    else:
+        return torch.abs((network_output - gt)).mean()
 
-def l2_loss(network_output, gt):
-    return ((network_output - gt) ** 2).mean()
+def l2_loss(network_output, gt, weight=None):
+    if weight:
+        return ((network_output - gt) ** 2 * weight).mean()
+    else:
+        return ((network_output - gt) ** 2).mean()
 
 def gaussian(window_size, sigma):
     gauss = torch.Tensor([exp(-(x - window_size // 2) ** 2 / float(2 * sigma ** 2)) for x in range(window_size)])
