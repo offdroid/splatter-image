@@ -17,7 +17,7 @@ from datasets.dataset_factory import get_dataset
 from datasets.shared_dataset import MaskedDataset
 from gaussian_renderer import render_predicted
 from scene.gaussian_predictor import GaussianSplatPredictor
-from utils.general_utils import collate_and_superimpose
+from utils.general_utils import adjust_channels
 from utils.loss_utils import ssim as ssim_fn
 
 
@@ -83,7 +83,7 @@ def evaluate_dataset(
         lpips_all_renders_cond = []
 
         data = {k: v.to(device) for k, v in data.items()}
-        input_data = input_data.to(device)
+        input_data = adjust_channels(model_cfg, input_data).to(device)
 
         rot_transform_quats = data["source_cv2wT_quat"][
             :, : model_cfg.data.input_images

@@ -14,6 +14,7 @@ data:
   subset: -1
   input_images: 1
   origin_distances: false
+  erase_occlusion: false
 opt:
   iterations: 800001
   base_lr: 0.00005
@@ -31,6 +32,7 @@ opt:
   lambda_lpips: 0.0
   pretrained_ckpt: null
   mask_p: 0.0
+  freeze_decoder: false
 
 model:
   max_sh_degree: 1
@@ -53,10 +55,11 @@ model:
   cross_view_attention: true
   base_dim: 128
   isotropic: false
+  input_channels: 4
 
 logging:
   ckpt_iterations: 1000
-  val_log: 10000
+  val_log: 5000
   loss_log: 10
-  loop_log: 10000
-  render_log: 10000
+  loop_log: 5000
+  render_log: 1000

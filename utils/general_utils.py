@@ -288,3 +288,12 @@ def superimpose_overlay(
 def collate_and_superimpose(input_images: int, max_tries: int, *args):
     view, overlay = default_collate(*args)
     return view, overlay, superimpose_overlay(view["gt_images"][:, : input_images, ...], overlay["gt_images"][:, : input_images, ...], max_tries=max_tries)
+
+
+def adjust_channels(cfg, xs):
+    if cfg.model.input_channels == 3 and hasattr(cfg.data, "erase_occlusion") and cfg.data.erase_occlusion:
+        a = xs[:, :, :cfg.model.input_channels, ...]
+        b = xs[:, :, cfg.model.input_channels:cfg.model.input_channels+1, ...]
+        return a * b + torch.tensor(1.0) * (1.0 - b)
+    else:
+        return xs[:, :, :cfg.model.input_channels, ...]

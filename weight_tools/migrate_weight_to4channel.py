@@ -4,16 +4,19 @@ import numpy as np
 import os
 
 parser = argparse.ArgumentParser()
-parser.add_argument("path")
+parser.add_argument("--path")
+parser.add_argument("--mode")
 args = parser.parse_args()
 device = "cpu"
 checkpoint = torch.load(
-    os.path.join(args.path, "model_latest.pth"), map_location=device
+    args.path, map_location=device
 )
 w = checkpoint["model_state_dict"]["network_with_offset.encoder.enc.64x64_conv.weight"]
 
 
 def weight_init(shape, mode, fan_in, fan_out):
+    if mode == "zero":
+        return torch.zero(shape)
     if mode == "xavier_uniform":
         return np.sqrt(6 / (fan_in + fan_out)) * (torch.rand(*shape) * 2 - 1)
     if mode == "xavier_normal":

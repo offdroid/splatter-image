@@ -1,0 +1,21 @@
+# @package _global_
+data:
+  znear: 1.2
+  zfar: 4.0
+  category: nmr
+  white_background: true
+  origin_distances: false
+  training_resolution: 64
+  fov: 29.999999290482176
+
+model:
+  attention_resolutions:
+  - 8
+
+opt: 
+  iterations: 100000 #1240001
+    #iterations: 1240001
+  batch_size: 48
+    #batch_size: 48
+  pretrained_ckpt: /home/stud/skubacz/splatter-image/pretrained/random_encoder_nmr_decoder/
+  freeze_decoder: true

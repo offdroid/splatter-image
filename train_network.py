@@ -1,12 +1,13 @@
 import glob
 import os
 from functools import partial
+from itertools import chain
 
 import hydra
 import lpips as lpips_lib
 import numpy as np
 import torch
-import torchvision.transforms.v2
+import torchvision.transforms.v2 as transforms
 from ema_pytorch import EMA
 from lightning.fabric import Fabric
 from omegaconf import DictConfig, OmegaConf
@@ -18,7 +19,7 @@ from datasets.shared_dataset import MaskedDataset
 from eval import evaluate_dataset
 from gaussian_renderer import render_predicted
 from scene.gaussian_predictor import GaussianSplatPredictor
-from utils.general_utils import collate_and_superimpose, safe_state
+from utils.general_utils import collate_and_superimpose, safe_state, adjust_channels
 from utils.loss_utils import l1_loss, l2_loss
 
 
@@ -121,6 +122,15 @@ def main(cfg: DictConfig):
         else:
             best_PSNR = 0.0
 
+    if cfg.opt.freeze_decoder:
+        # Freeze the decoder. The decoder seems to be split into two
+        print("Freezing decoder. Only encoder will be fine-tuned")
+        for param in chain(
+            gaussian_predictor.network_with_offset.encoder.dec.parameters(),
+            gaussian_predictor.network_with_offset.out.parameters(),
+        ):
+            param.requires_grad = False
+
     if cfg.opt.ema.use and fabric.is_global_zero:
         ema = EMA(
             gaussian_predictor,
@@ -162,7 +172,9 @@ def main(cfg: DictConfig):
         collate_fn=partial(collate_and_superimpose, cfg.data.input_images, 200),
     )
 
-    val_dataset = MaskedDataset(cfg, get_dataset(cfg, "val"), return_superimposed_input=True)
+    val_dataset = MaskedDataset(
+        cfg, get_dataset(cfg, "val"), return_superimposed_input=True
+    )
     val_dataloader = DataLoader(
         val_dataset,
         batch_size=1,
@@ -173,7 +185,9 @@ def main(cfg: DictConfig):
         prefetch_factor=2,
     )
 
-    test_dataset = get_dataset(cfg, "vis")
+    test_dataset = MaskedDataset(
+        cfg, get_dataset(cfg, "vis"), return_superimposed_input=True
+    )
     test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=True)
 
     # distribute model and training dataset
@@ -219,7 +233,16 @@ def main(cfg: DictConfig):
                     )
                 else:
                     focals_pixels_pred = None
-                    input_images = input_data
+                    input_images = input_data #torch.cat(
+                    #    [
+                    #        transforms.ColorJitter(brightness=0.0, hue=0.0)(
+                    #            input_data[:, :, :3]
+                    #        ),
+                    #        input_data[:, :, 3:4],
+                    #    ],
+                    #    dim=2,
+                    #)
+                    input_images = adjust_channels(cfg, input_images)
 
             gaussian_splats = gaussian_predictor(
                 input_images,
@@ -435,10 +458,10 @@ def main(cfg: DictConfig):
                         vis_data, _, vis_input_data = next(test_iterator)
                     except UnboundLocalError:
                         test_iterator = iter(test_dataloader)
-                        vis_data = next(test_iterator)
+                        vis_data, _, vis_input_data = next(test_iterator)
                     except StopIteration or UnboundLocalError:
                         test_iterator = iter(test_dataloader)
-                        vis_data = next(test_iterator)
+                        vis_data, _, vis_input_data = next(test_iterator)
 
                     vis_data = {k: fabric.to_device(v) for k, v in vis_data.items()}
                     vis_input_data = fabric.to_device(vis_input_data)
@@ -466,7 +489,7 @@ def main(cfg: DictConfig):
                         )
                     else:
                         focals_pixels_pred = None
-                        input_images = vis_input_data
+                        input_images = adjust_channels(cfg, vis_input_data)
 
                     gaussian_splats_vis = gaussian_predictor(
                         input_images,
