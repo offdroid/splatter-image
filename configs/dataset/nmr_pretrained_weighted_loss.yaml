@@ -1,0 +1,24 @@
+# @package _global_
+data:
+  znear: 1.2
+  zfar: 4.0
+  category: nmr
+  white_background: true
+  origin_distances: false
+  training_resolution: 64
+  fov: 29.999999290482176
+
+model:
+  attention_resolutions:
+  - 8
+
+opt: 
+  iterations: 100000 #1240001
+  batch_size: 48
+  pretrained_ckpt: /home/stud/skubacz/splatter-image/nmr_model_ch4/
+  freeze_decoder: false
+  weight_loss:
+    enabled: true
+    global_coef: 0.05
+    occluded_area: 1.0
+    outline: 1.0

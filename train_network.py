@@ -223,7 +223,7 @@ def main(cfg: DictConfig):
                     assert False
                 else:
                     focals_pixels_pred = None
-                    input_images = input_data #torch.cat(
+                    input_images = input_data  # torch.cat(
                     #    [
                     #        transforms.ColorJitter(brightness=0.0, hue=0.0)(
                     #            input_data[:, :, :3]
@@ -231,7 +231,7 @@ def main(cfg: DictConfig):
                     #        input_data[:, :, 3:4],
                     #    ],
                     #    dim=2,
-                    #)
+                    # )
                     input_images = adjust_channels(cfg, input_images)
 
             gaussian_splats = gaussian_predictor(
@@ -270,21 +270,39 @@ def main(cfg: DictConfig):
                         cfg,
                         focals_pixels=focals_pixels_render,
                     )["render"]
-                    if r_idx == 0:
-                        # Input image
-                        lw_occluded_area = occluded_area(data["gt_images"][b_idx, r_idx, 3], overlay_data["gt_images"][b_idx, r_idx, 3])
-                        lw_outline = mask_to_outline(input_images[b_idx, 0, 0])
-                        lw = 1.0 + (lw_occluded_area + lw_outline) / 2 * 0.1
-                    else:
-                        lw = torch.ones(())
+
+                    if cfg.opt.weight_loss.enabled:
+                        if r_idx == 0:
+                            # Input image
+                            lw = 0.0
+                            if cfg.opt.weight_loss.occluded_area > 0.0:
+                                lw += (
+                                    occluded_area(
+                                        data["gt_images"][b_idx, r_idx, 3],
+                                        overlay_data["gt_images"][b_idx, r_idx, 3],
+                                    )
+                                    * cfg.opt.weight_loss.occluded_area
+                                )
+                            if cfg.opt.weight_loss.outline:
+                                lw += (
+                                    mask_to_outline(input_images[b_idx, 0, 0])
+                                    * cfg.opt.weight_loss.outline
+                                )
+
+                            lw = 1.0 + lw * cfg.opt.weight_loss.global_coef
+                        else:
+                            lw = torch.ones_like(image)
+                        loss_weight.append(lw)
                     # Put in a list for a later loss computation
                     rendered_images.append(image)
-                    loss_weight.append(lw)
                     gt_image = data["gt_images"][b_idx, r_idx, :3]
                     gt_images.append(gt_image)
                     input_image = input_images[b_idx, 0, ...]
             rendered_images = torch.stack(rendered_images, dim=0)
             gt_images = torch.stack(gt_images, dim=0)
+            loss_weight = (
+                torch.stack(loss_weight, dim=0) if cfg.opt.weight_loss.enabled else None
+            )
             # Loss computation
             l12_loss_sum = loss_fn(rendered_images, gt_images, loss_weight)
             if cfg.opt.lambda_lpips != 0:

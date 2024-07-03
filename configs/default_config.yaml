@@ -33,6 +33,11 @@ opt:
   pretrained_ckpt: null
   mask_p: 0.0
   freeze_decoder: false
+  weight_loss:
+    enabled: false
+    global_coef: 0.05
+    occluded_area: 1.0
+    outline: 1.0
 
 model:
   max_sh_degree: 1
