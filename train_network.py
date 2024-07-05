@@ -256,7 +256,10 @@ def main(cfg: DictConfig):
                 gaussian_splat_batch = {
                     k: v[b_idx].contiguous() for k, v in gaussian_splats.items()
                 }
-                for r_idx in range(cfg.data.input_images, data["gt_images"].shape[1]):
+                for r_idx in range(
+                    0 if cfg.opt.compute_loss_on_condition else cfg.data.input_images,
+                    data["gt_images"].shape[1],
+                ):
                     if "focals_pixels" in data.keys():
                         focals_pixels_render = data["focals_pixels"][b_idx, r_idx].cpu()
                     else:

@@ -38,6 +38,7 @@ opt:
     global_coef: 0.05
     occluded_area: 1.0
     outline: 1.0
+  compute_loss_on_condition: false
 
 model:
   max_sh_degree: 1
