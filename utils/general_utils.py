@@ -27,7 +27,10 @@ def inverse_sigmoid(x):
 
 def PILtoTorch(pil_image, resolution):
     resized_image_PIL = pil_image.resize(resolution)
-    resized_image = torch.from_numpy(np.array(resized_image_PIL)) / 255.0
+    resized_image = (
+        torch.as_tensor(np.array(resized_image_PIL).astype("float32")) / 255.0
+    )
+    print(resized_image.dtype)
     if len(resized_image.shape) == 3:
         return resized_image.permute(2, 0, 1)
     else:
@@ -300,7 +303,9 @@ def collate_and_superimpose(input_images: int, max_tries: int, *args):
 
 
 def mask_to_outline(mask):
-    return (torchvision.transforms.GaussianBlur(kernel_size=21, sigma=3.0)(mask) - mask) / 255.0
+    return (
+        torchvision.transforms.GaussianBlur(kernel_size=21, sigma=3.0)(mask) - mask
+    ) / 255.0
 
 
 def occluded_area(a, b):

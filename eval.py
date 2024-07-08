@@ -376,7 +376,9 @@ def main(
     if training_cfg.data.category == "objaverse" and split in ["test", "vis"]:
         training_cfg.data.category = "gso"
     # instantiate dataset loader
-    dataset = MaskedDataset(training_cfg, get_dataset(training_cfg, split), return_superimposed_input=True)
+    dataset = MaskedDataset(
+        training_cfg, get_dataset(training_cfg, split), return_superimposed_input=True
+    )
     dataloader = DataLoader(
         dataset,
         batch_size=1,
