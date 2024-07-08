@@ -30,7 +30,6 @@ def PILtoTorch(pil_image, resolution):
     resized_image = (
         torch.as_tensor(np.array(resized_image_PIL).astype("float32")) / 255.0
     )
-    print(resized_image.dtype)
     if len(resized_image.shape) == 3:
         return resized_image.permute(2, 0, 1)
     else:
