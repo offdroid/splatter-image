@@ -1,3 +1,11 @@
 # @package _global_
 opt:
   compute_loss_on_condition: true
+  weight_loss:
+    enabled: true
+    offset: 0.0
+    global_coef: 1.0
+    occluded_area: 2.0
+    outline: 0.0
+  batch_size: 24
+

@@ -35,6 +35,7 @@ opt:
   freeze_decoder: false
   weight_loss:
     enabled: false
+    offset: 1.0
     global_coef: 0.05
     occluded_area: 1.0
     outline: 1.0

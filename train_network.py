@@ -19,7 +19,13 @@ from datasets.shared_dataset import MaskedDataset
 from eval import evaluate_dataset
 from gaussian_renderer import render_predicted
 from scene.gaussian_predictor import GaussianSplatPredictor
-from utils.general_utils import collate_and_superimpose, safe_state, adjust_channels
+from utils.general_utils import (
+    collate_and_superimpose,
+    safe_state,
+    adjust_channels,
+    occluded_area,
+    mask_to_outline,
+)
 from utils.loss_utils import l1_loss, l2_loss
 
 
@@ -273,28 +279,35 @@ def main(cfg: DictConfig):
                         cfg,
                         focals_pixels=focals_pixels_render,
                     )["render"]
-
                     if cfg.opt.weight_loss.enabled:
-                        if r_idx == 0:
-                            # Input image
-                            lw = 0.0
-                            if cfg.opt.weight_loss.occluded_area > 0.0:
-                                lw += (
-                                    occluded_area(
-                                        data["gt_images"][b_idx, r_idx, 3],
-                                        overlay_data["gt_images"][b_idx, r_idx, 3],
-                                    )
-                                    * cfg.opt.weight_loss.occluded_area
+                        n_weights = 0
+                        lw = torch.zeros_like(image)
+                        if (
+                            r_idx < cfg.data.input_images
+                            and cfg.opt.weight_loss.occluded_area > 0.0
+                        ):
+                            # WARN: Input image is currently always skipped
+                            lw += (
+                                occluded_area(
+                                    data["gt_images"][b_idx, r_idx, 3:4],
+                                    overlay_data["gt_images"][b_idx, r_idx, 3:4],
                                 )
-                            if cfg.opt.weight_loss.outline:
-                                lw += (
-                                    mask_to_outline(input_images[b_idx, 0, 0])
-                                    * cfg.opt.weight_loss.outline
-                                )
-
-                            lw = 1.0 + lw * cfg.opt.weight_loss.global_coef
+                                * cfg.opt.weight_loss.occluded_area
+                            )
+                            n_weights += 1
+                        if cfg.opt.weight_loss.outline:
+                            lw += (
+                                mask_to_outline(input_images[b_idx, 0, 3:4])
+                                * cfg.opt.weight_loss.outline
+                            )
+                            n_weights += 1
+                        if n_weights > 0:
+                            lw = (
+                                cfg.opt.weight_loss.offset
+                                + lw / n_weights * cfg.opt.weight_loss.global_coef
+                            )
                         else:
-                            lw = torch.ones_like(image)
+                            lw = torch.ones_like(lw)
                         loss_weight.append(lw)
                     # Put in a list for a later loss computation
                     rendered_images.append(image)
