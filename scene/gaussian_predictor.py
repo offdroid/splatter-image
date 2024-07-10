@@ -522,18 +522,19 @@ class SongUNet(nn.Module):
             1,
             1,
         ],  # Resampling filter: [1,1] for DDPM++, [1,3,3,1] for NCSN++.
-        skip_encoder=False,
-        dino=None,
+        dec_in_multipler=None,
     ):
         assert embedding_type in ["fourier", "positional"]
         assert encoder_type in ["standard", "skip", "residual"]
         assert decoder_type in ["standard", "skip"]
 
         super().__init__()
-        self.skip_encoder = skip_encoder
-        self.dino = dino
         self.label_dropout = label_dropout
         self.emb_dim_in = emb_dim_in
+        if dec_in_multipler is not None:
+            self.dec_in_multipler = dec_in_multipler
+        else:
+            self.dec_in_multipler = (1, 1, 1)
         if emb_dim_in > 0:
             emb_channels = model_channels * channel_mult_emb
         else:
@@ -626,21 +627,25 @@ class SongUNet(nn.Module):
             block.out_channels for name, block in self.enc.items() if "aux" not in name
         ]
 
+        dec_in_channels = [
+            (cout - x) if x <= 0 else (cout * x) for x in self.dec_in_multipler
+        ]
+
         # Decoder.
         self.dec = torch.nn.ModuleDict()
         for level, mult in reversed(list(enumerate(channel_mult))):
             res = img_resolution >> level
             if level == len(channel_mult) - 1:
-                print("first decoder level")
-                print(cin, cout)
                 self.dec[f"{res}x{res}_in0"] = UNetBlock(
-                    in_channels=cout * 2,
-                    out_channels=cout,
+                    in_channels=dec_in_channels[0],
+                    out_channels=dec_in_channels[1],
                     attention=True,
                     **block_kwargs,
                 )
                 self.dec[f"{res}x{res}_in1"] = UNetBlock(
-                    in_channels=cout, out_channels=cout, **block_kwargs
+                    in_channels=dec_in_channels[1],
+                    out_channels=dec_in_channels[2],
+                    **block_kwargs,
                 )
             else:
                 self.dec[f"{res}x{res}_up"] = UNetBlock(
@@ -673,10 +678,9 @@ class SongUNet(nn.Module):
                     **init,
                 )  # init_zero)
 
-    def forward(self, x, film_camera_emb=None, N_views_xa=1):
+    def forward(self, x, feats=None, film_camera_emb=None, N_views_xa=1):
+
         emb = None
-        with torch.no_grad():
-            dino_emb = self.dino(CenterPadding(14)(x[:, :3, ...]))
 
         if film_camera_emb is not None:
             if self.emb_dim_in != 1:
@@ -719,15 +723,13 @@ class SongUNet(nn.Module):
                 tmp = block(silu(tmp), N_views_xa)
                 aux = tmp if aux is None else tmp + aux
             else:
-                if "in0" in name:
-                    with torch.no_grad():
-                        dino_emb = F.interpolate(
-                            dino_emb[:, None, ...],
-                            size=torch.numel(x[0, ...]),
-                            mode="nearest",
-                        )
-                        dino_emb = dino_emb.view(x.shape)
-                        x = torch.cat([x, dino_emb], dim=1)
+                if "in0" in name and feats is not None:
+                    feats = F.interpolate(
+                        feats[:, None, ...],
+                        size=torch.numel(x[0, ...]),
+                        mode="linear",
+                    ).view(x.shape)
+                    x = torch.cat([x, feats], dim=1)
                 if x.shape[1] != block.in_channels:
                     # skip connection is pixel-aligned which is good for
                     # foreground features
@@ -742,7 +744,7 @@ class SongUNet(nn.Module):
 
 
 class SingleImageSongUNetPredictor(nn.Module):
-    def __init__(self, cfg, out_channels, bias, scale):
+    def __init__(self, cfg, out_channels, bias, scale, include_feats=False):
         super(SingleImageSongUNetPredictor, self).__init__()
         self.out_channels = out_channels
         self.cfg = cfg
@@ -753,8 +755,10 @@ class SingleImageSongUNetPredictor(nn.Module):
             in_channels = cfg.model.input_channels
             emb_dim_in = 6 * cfg.cam_embd.dimension
 
-        self.dino = torch.hub.load("facebookresearch/dinov2", "dinov2_vitl14")
-        # self.dino_2_encoder = nn.Linear(1024, 16)
+        if include_feats:
+            self.dino = torch.hub.load("facebookresearch/dinov2", "dinov2_vitl14")
+        else:
+            self.dino = None
         self.encoder = SongUNet(
             cfg.data.training_resolution,
             in_channels,
@@ -764,8 +768,7 @@ class SingleImageSongUNetPredictor(nn.Module):
             emb_dim_in=emb_dim_in,
             channel_mult_noise=0,
             attn_resolutions=cfg.model.attention_resolutions,
-            skip_encoder=True,
-            dino=self.dino,
+            dec_in_multipler=(2, 1, 1) if self.dino is not None else None,
         )
         self.out = nn.Conv2d(
             in_channels=sum(out_channels), out_channels=sum(out_channels), kernel_size=1
@@ -783,7 +786,14 @@ class SingleImageSongUNetPredictor(nn.Module):
             start_channels += out_channel
 
     def forward(self, x, film_camera_emb=None, N_views_xa=1):
-        x = self.encoder(x, film_camera_emb=film_camera_emb, N_views_xa=N_views_xa)
+        if self.dino is not None:
+            with torch.no_grad():
+                feats = self.dino(CenterPadding(14)(x[:, :3, ...]))
+        else:
+            feats = None
+        x = self.encoder(
+            x, feats=feats, film_camera_emb=film_camera_emb, N_views_xa=N_views_xa
+        )
 
         return self.out(x)
 

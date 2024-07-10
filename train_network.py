@@ -11,6 +11,7 @@ import torchvision.transforms.v2 as transforms
 from ema_pytorch import EMA
 from lightning.fabric import Fabric
 from omegaconf import DictConfig, OmegaConf
+from torch import nn
 from torch.utils.data import DataLoader
 
 import wandb
@@ -18,26 +19,36 @@ from datasets.dataset_factory import get_dataset
 from datasets.shared_dataset import MaskedDataset
 from eval import evaluate_dataset
 from gaussian_renderer import render_predicted
+from gan.discriminator import Discriminator
 from scene.gaussian_predictor import GaussianSplatPredictor
 from utils.general_utils import (
-    collate_and_superimpose,
-    safe_state,
     adjust_channels,
-    occluded_area,
+    collate_and_superimpose,
     mask_to_outline,
+    occluded_area,
+    safe_state,
 )
+from torcheval.metrics.functional import binary_accuracy
 from utils.loss_utils import l1_loss, l2_loss
+
 
 def train_discriminator(netD: nn.Module, criterion, d_optimizer, fake, real):
     n = fake.shape[0]
     assert fake.shape == real.shape
-    d_loss = criterion(netD(torch.cat([fake, real])), torch.cat([torch.zeros(n), torch.ones(n)]))
-    loss = d_loss[:n].detatch().cpu().numpy(), d_loss[n:].detatch().cpu().numpy()
+    preds = netD(torch.cat([fake, real]))[:, 0]
+    targets = torch.cat([torch.zeros(n), torch.ones(n)]).cuda()
+
+    d_loss = criterion(preds, targets)
+    loss = {
+        "loss": d_loss.mean().item(),
+        "loss_fake": d_loss[:n].mean().item(),
+        "loss_real": d_loss[n:].mean().item(),
+        "acc": binary_accuracy(preds, targets),
+    }
     d_loss.mean().backward()
     d_optimizer.step()
     d_optimizer.zero_grad()
     return loss
-    
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="default_config")
@@ -83,6 +94,7 @@ def main(cfg: DictConfig):
 
     gaussian_predictor = GaussianSplatPredictor(cfg)
     gaussian_predictor = gaussian_predictor.to(memory_format=torch.channels_last)
+    discriminator = Discriminator("tmp").to("cuda")
 
     l = []
     if cfg.model.network_with_offset:
@@ -167,7 +179,7 @@ def main(cfg: DictConfig):
         lpips_fn = fabric.to_device(lpips_lib.LPIPS(net="vgg"))
     lambda_lpips = cfg.opt.lambda_lpips
     lambda_l12 = 1.0 - lambda_lpips
-    d_loss = nn.BCEWithLogitsLoss(reduction='none')
+    d_loss = nn.BCEWithLogitsLoss(reduction="none")
 
     bg_color = [1, 1, 1] if cfg.data.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32)
@@ -330,8 +342,13 @@ def main(cfg: DictConfig):
             rendered_images = torch.stack(rendered_images, dim=0)
             gt_images = torch.stack(gt_images, dim=0)
 
-            d_loss_fake, d_loss_real = train_discriminator(discriminator, d_loss, d_optimizer, rendered_images, gt_images)
-            print(f"Discriminator loss: {0.5 * d_loss_fake + 0.5 * d_loss_real} fake={d_loss_fake} real={d_loss_real}")
+            d_metrics = train_discriminator(
+                discriminator, d_loss, d_optimizer, rendered_images, gt_images
+            )
+            wandb.log(
+                {f"d_{k}": v for k, v in d_metrics.items()},
+                step=iteration,
+            )
 
             loss_weight = (
                 torch.stack(loss_weight, dim=0) if cfg.opt.weight_loss.enabled else None
