@@ -28,6 +28,17 @@ from utils.general_utils import (
 )
 from utils.loss_utils import l1_loss, l2_loss
 
+def train_discriminator(netD: nn.Module, criterion, d_optimizer, fake, real):
+    n = fake.shape[0]
+    assert fake.shape == real.shape
+    d_loss = criterion(netD(torch.cat([fake, real])), torch.cat([torch.zeros(n), torch.ones(n)]))
+    loss = d_loss[:n].detatch().cpu().numpy(), d_loss[n:].detatch().cpu().numpy()
+    d_loss.mean().backward()
+    d_optimizer.step()
+    d_optimizer.zero_grad()
+    return loss
+    
+
 
 @hydra.main(version_base=None, config_path="configs", config_name="default_config")
 def main(cfg: DictConfig):
@@ -89,6 +100,7 @@ def main(cfg: DictConfig):
             }
         )
     optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15, betas=cfg.opt.betas)
+    d_optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15, betas=cfg.opt.betas)
 
     # Resuming training
     if fabric.is_global_zero:
@@ -155,6 +167,7 @@ def main(cfg: DictConfig):
         lpips_fn = fabric.to_device(lpips_lib.LPIPS(net="vgg"))
     lambda_lpips = cfg.opt.lambda_lpips
     lambda_l12 = 1.0 - lambda_lpips
+    d_loss = nn.BCEWithLogitsLoss(reduction='none')
 
     bg_color = [1, 1, 1] if cfg.data.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32)
@@ -316,9 +329,14 @@ def main(cfg: DictConfig):
                     input_image = input_images[b_idx, 0, ...]
             rendered_images = torch.stack(rendered_images, dim=0)
             gt_images = torch.stack(gt_images, dim=0)
+
+            d_loss_fake, d_loss_real = train_discriminator(discriminator, d_loss, d_optimizer, rendered_images, gt_images)
+            print(f"Discriminator loss: {0.5 * d_loss_fake + 0.5 * d_loss_real} fake={d_loss_fake} real={d_loss_real}")
+
             loss_weight = (
                 torch.stack(loss_weight, dim=0) if cfg.opt.weight_loss.enabled else None
             )
+
             # Loss computation
             l12_loss_sum = loss_fn(rendered_images, gt_images, loss_weight)
             if cfg.opt.lambda_lpips != 0:
