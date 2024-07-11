@@ -500,6 +500,7 @@ class SongUNet(nn.Module):
         img_resolution,  # Image resolution at input/output.
         in_channels,  # Number of color channels at input.
         out_channels,  # Number of color channels at output.
+        cfg,
         emb_dim_in=0,  # Input embedding dim.
         augment_dim=0,  # Augmentation label dimensionality, 0 = no augmentation.
         model_channels=128,  # Base multiplier for the number of channels.
@@ -622,11 +623,17 @@ class SongUNet(nn.Module):
             block.out_channels for name, block in self.enc.items() if "aux" not in name
         ]
 
-        dec_in_channels = [cout, cinterm_unet_multiplier]
-        if cfg.model.extend_bottleneck.concat_mode == "copy":
-            dec_in_channels[0] *= 2
+        if cfg.model.extend_bottleneck.enabled == True:
+            dec_in_channels = [
+                cout,
+                cfg.model.extend_bottleneck.cinterm_unet_multiplier,
+            ]
+            if cfg.model.extend_bottleneck.concat_mode == "copy":
+                dec_in_channels[0] *= 2
+            else:
+                dec_in_channels[0] += int(cfg.model.extend_bottleneck.concat_mode)
         else:
-            dec_in_channels[0] += int(cfg.model.extend_bottleneck.concat_mode)
+            dec_in_channels = [cout, cout]
 
         # Decoder.
         self.dec = torch.nn.ModuleDict()
@@ -721,11 +728,14 @@ class SongUNet(nn.Module):
                 aux = tmp if aux is None else tmp + aux
             else:
                 if "in0" in name and feats is not None:
+                    assert self.cfg.model.extend_bottleneck.enabled == True
                     assert len(x.shape) == 4  # B C H W
                     feats_shape = x.shape
-                    if cfg.model.extend_bottleneck.concat_mode != "copy":
+                    if self.cfg.model.extend_bottleneck.concat_mode != "copy":
                         # Features are going to be 'streched' to a custom number of channels
-                        feats_shape[1] = int(cfg.model.extend_bottleneck.concat_mode)
+                        feats_shape[1] = int(
+                            self.cfg.model.extend_bottleneck.concat_mode
+                        )
                     if feats_shape[1:].numel() < feats.shape()[1:].numel():
                         print(
                             "WARN: Downsampling bottleneck features to less than original!"
@@ -750,7 +760,7 @@ class SongUNet(nn.Module):
 
 
 class SingleImageSongUNetPredictor(nn.Module):
-    def __init__(self, cfg, out_channels, bias, scale, include_feats=False):
+    def __init__(self, cfg, out_channels, bias, scale):
         super(SingleImageSongUNetPredictor, self).__init__()
         self.out_channels = out_channels
         self.cfg = cfg
@@ -761,7 +771,7 @@ class SingleImageSongUNetPredictor(nn.Module):
             in_channels = cfg.model.input_channels
             emb_dim_in = 6 * cfg.cam_embd.dimension
 
-        if include_feats:
+        if cfg.model.extend_bottleneck.enabled == True:
             self.feat_model = torch.hub.load(
                 cfg.model.extend_bottleneck.feats.repo,
                 cfg.model.extend_bottleneck.feats.model,
@@ -777,7 +787,7 @@ class SingleImageSongUNetPredictor(nn.Module):
             emb_dim_in=emb_dim_in,
             channel_mult_noise=0,
             attn_resolutions=cfg.model.attention_resolutions,
-            dec_in_multipler=(2, 1, 1) if self.feat_model is not None else None,
+            cfg=cfg,
         )
         self.out = nn.Conv2d(
             in_channels=sum(out_channels), out_channels=sum(out_channels), kernel_size=1

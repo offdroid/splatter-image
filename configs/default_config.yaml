@@ -66,7 +66,7 @@ model:
   isotropic: false
   input_channels: 4
   extend_bottleneck:
-    enabled: true
+    enabled: false
     feats:
       repo: "facebookresearch/dinov2"
       model: "dinov2_vitl14"

@@ -32,42 +32,57 @@ from utils.general_utils import (
 from utils.loss_utils import l1_loss, l2_loss
 
 
-def train_discriminator(
-    cfg, netD: nn.Module, criterion, d_optimizer, fake, real, b_idxes
+def train_gan(
+    cfg, netD: nn.Module, criterion, d_optimizer, g_optimizer, fake, real, b_idxes
 ):
     n = fake.shape[0]
     assert fake.shape == real.shape
 
-    def noise(x):
-        sigma = cfg.gan.noise_sigma
-        out = x + torch.normal(std=torch.full_like(sigma))
-        return torch.clamp(out, min=0.0, max=1.0)
+    class Noise(nn.Module):
+        def __init__(self, sigma):
+            super().__init__()
+            self.sigma = sigma
+
+        def forward(self, x):
+            out = x + torch.normal(std=torch.full_like(x, fill=self.sigma))
+            return torch.clamp(out, min=0.0, max=1.0)
 
     sub_n = max(int(n * cfg.gan.sample_p), 1)
     idx = torch.randperm(n)[:sub_n]
     fake, real = fake[idx], real[idx]
 
+    # TODO: Why does this not work?
     perturb = transforms.Compose(
         [
             transforms.ColorJitter(brightness=0.2, hue=0.2),
             transforms.RandomVerticalFlip(),
             transforms.RandomHorizontalFlip(),
-            noise,
+            Noise(sigma=cfg.gan.noise_sigma),
         ]
     )
-    preds = netD(perturb(torch.cat([fake, real])))[:, 0]
+    # preds = netD(perturb(torch.cat([fake, real])))[:, 0]
+    preds = netD(torch.cat([fake, real]))[:, 0]
     targets = torch.cat([torch.zeros(sub_n), torch.ones(sub_n)]).to(fake.device)
 
     d_loss = criterion(preds, targets)
     loss = {
-        "loss": d_loss.mean().item(),
-        "loss_fake": d_loss[:n].mean().item(),
-        "loss_real": d_loss[n:].mean().item(),
-        "acc": binary_accuracy(preds, targets),
+        "d_loss": d_loss.mean().item(),
+        "d_loss_fake": d_loss[:sub_n].mean().item(),
+        "d_loss_real": d_loss[sub_n:].mean().item(),
+        "d_acc": binary_accuracy(preds, targets),
     }
     d_loss.mean().backward()
     d_optimizer.step()
     d_optimizer.zero_grad()
+
+    # Train the generator to learn the opposite of discriminator, i.e. labels are switched
+    preds = netD(fake)[:, 0]
+    targets = torch.ones(sub_n).to(fake.device)
+    g_loss = criterion(preds, targets)
+    g_loss.mean().backward()
+    g_optimizer.step()
+    g_optimizer.zero_grad()
+    # Next don't do the optimization step just yet. Combine (weighted) with reconstruction loss
     return loss
 
 
@@ -135,6 +150,7 @@ def main(cfg: DictConfig):
     if cfg.gan.enabled == True:
         discriminator = Discriminator("tmp").to("cuda")
         d_optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15, betas=cfg.opt.betas)
+        g_optimizer = optimizer  # TODO: Change this
 
     # Resuming training
     if fabric.is_global_zero:
@@ -201,7 +217,7 @@ def main(cfg: DictConfig):
         lpips_fn = fabric.to_device(lpips_lib.LPIPS(net="vgg"))
     lambda_lpips = cfg.opt.lambda_lpips
     lambda_l12 = 1.0 - lambda_lpips
-    d_loss = nn.BCEWithLogitsLoss(reduction="none")
+    gan_loss = nn.BCEWithLogitsLoss(reduction="none")
 
     bg_color = [1, 1, 1] if cfg.data.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32)
@@ -365,14 +381,15 @@ def main(cfg: DictConfig):
                     b_idxes.append(b_idx)
             rendered_images = torch.stack(rendered_images, dim=0)
             gt_images = torch.stack(gt_images, dim=0)
-            b_idxes = torch.stack(b_idxes, dim=0)
+            b_idxes = torch.LongTensor(b_idxes)
 
             if cfg.gan.enabled == True:
-                d_metrics = train_discriminator(
+                d_metrics = train_gan(
                     cfg,
                     discriminator,
-                    d_loss,
+                    gan_loss,
                     d_optimizer,
+                    g_optimizer,
                     rendered_images,
                     gt_images,
                     b_idxes,
