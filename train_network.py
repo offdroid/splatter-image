@@ -13,13 +13,14 @@ from lightning.fabric import Fabric
 from omegaconf import DictConfig, OmegaConf
 from torch import nn
 from torch.utils.data import DataLoader
+from torcheval.metrics.functional import binary_accuracy
 
 import wandb
 from datasets.dataset_factory import get_dataset
 from datasets.shared_dataset import MaskedDataset
 from eval import evaluate_dataset
-from gaussian_renderer import render_predicted
 from gan.discriminator import Discriminator
+from gaussian_renderer import render_predicted
 from scene.gaussian_predictor import GaussianSplatPredictor
 from utils.general_utils import (
     adjust_channels,
@@ -28,15 +29,34 @@ from utils.general_utils import (
     occluded_area,
     safe_state,
 )
-from torcheval.metrics.functional import binary_accuracy
 from utils.loss_utils import l1_loss, l2_loss
 
 
-def train_discriminator(netD: nn.Module, criterion, d_optimizer, fake, real):
+def train_discriminator(
+    cfg, netD: nn.Module, criterion, d_optimizer, fake, real, b_idxes
+):
     n = fake.shape[0]
     assert fake.shape == real.shape
-    preds = netD(torch.cat([fake, real]))[:, 0]
-    targets = torch.cat([torch.zeros(n), torch.ones(n)]).cuda()
+
+    def noise(x):
+        sigma = cfg.gan.noise_sigma
+        out = x + torch.normal(std=torch.full_like(sigma))
+        return torch.clamp(out, min=0.0, max=1.0)
+
+    sub_n = max(int(n * cfg.gan.sample_p), 1)
+    idx = torch.randperm(n)[:sub_n]
+    fake, real = fake[idx], real[idx]
+
+    perturb = transforms.Compose(
+        [
+            transforms.ColorJitter(brightness=0.2, hue=0.2),
+            transforms.RandomVerticalFlip(),
+            transforms.RandomHorizontalFlip(),
+            noise,
+        ]
+    )
+    preds = netD(perturb(torch.cat([fake, real])))[:, 0]
+    targets = torch.cat([torch.zeros(sub_n), torch.ones(sub_n)]).to(fake.device)
 
     d_loss = criterion(preds, targets)
     loss = {
@@ -94,7 +114,6 @@ def main(cfg: DictConfig):
 
     gaussian_predictor = GaussianSplatPredictor(cfg)
     gaussian_predictor = gaussian_predictor.to(memory_format=torch.channels_last)
-    discriminator = Discriminator("tmp").to("cuda")
 
     l = []
     if cfg.model.network_with_offset:
@@ -112,7 +131,10 @@ def main(cfg: DictConfig):
             }
         )
     optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15, betas=cfg.opt.betas)
-    d_optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15, betas=cfg.opt.betas)
+
+    if cfg.gan.enabled == True:
+        discriminator = Discriminator("tmp").to("cuda")
+        d_optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15, betas=cfg.opt.betas)
 
     # Resuming training
     if fabric.is_global_zero:
@@ -280,6 +302,7 @@ def main(cfg: DictConfig):
             rendered_images = []
             gt_images = []
             loss_weight = []
+            b_idxes = []
             for b_idx in range(data["gt_images"].shape[0]):
                 # image at index 0 is training, remaining images are targets
                 # Rendering is done sequentially because gaussian rasterization code
@@ -339,16 +362,25 @@ def main(cfg: DictConfig):
                     gt_image = data["gt_images"][b_idx, r_idx, :3]
                     gt_images.append(gt_image)
                     input_image = input_images[b_idx, 0, ...]
+                    b_idxes.append(b_idx)
             rendered_images = torch.stack(rendered_images, dim=0)
             gt_images = torch.stack(gt_images, dim=0)
+            b_idxes = torch.stack(b_idxes, dim=0)
 
-            d_metrics = train_discriminator(
-                discriminator, d_loss, d_optimizer, rendered_images, gt_images
-            )
-            wandb.log(
-                {f"d_{k}": v for k, v in d_metrics.items()},
-                step=iteration,
-            )
+            if cfg.gan.enabled == True:
+                d_metrics = train_discriminator(
+                    cfg,
+                    discriminator,
+                    d_loss,
+                    d_optimizer,
+                    rendered_images,
+                    gt_images,
+                    b_idxes,
+                )
+                wandb.log(
+                    {f"d_{k}": v for k, v in d_metrics.items()},
+                    step=iteration,
+                )
 
             loss_weight = (
                 torch.stack(loss_weight, dim=0) if cfg.opt.weight_loss.enabled else None

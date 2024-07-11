@@ -522,7 +522,6 @@ class SongUNet(nn.Module):
             1,
             1,
         ],  # Resampling filter: [1,1] for DDPM++, [1,3,3,1] for NCSN++.
-        dec_in_multipler=None,
     ):
         assert embedding_type in ["fourier", "positional"]
         assert encoder_type in ["standard", "skip", "residual"]
@@ -531,10 +530,6 @@ class SongUNet(nn.Module):
         super().__init__()
         self.label_dropout = label_dropout
         self.emb_dim_in = emb_dim_in
-        if dec_in_multipler is not None:
-            self.dec_in_multipler = dec_in_multipler
-        else:
-            self.dec_in_multipler = (1, 1, 1)
         if emb_dim_in > 0:
             emb_channels = model_channels * channel_mult_emb
         else:
@@ -627,9 +622,11 @@ class SongUNet(nn.Module):
             block.out_channels for name, block in self.enc.items() if "aux" not in name
         ]
 
-        dec_in_channels = [
-            (cout - x) if x <= 0 else (cout * x) for x in self.dec_in_multipler
-        ]
+        dec_in_channels = [cout, cinterm_unet_multiplier]
+        if cfg.model.extend_bottleneck.concat_mode == "copy":
+            dec_in_channels[0] *= 2
+        else:
+            dec_in_channels[0] += int(cfg.model.extend_bottleneck.concat_mode)
 
         # Decoder.
         self.dec = torch.nn.ModuleDict()
@@ -644,7 +641,7 @@ class SongUNet(nn.Module):
                 )
                 self.dec[f"{res}x{res}_in1"] = UNetBlock(
                     in_channels=dec_in_channels[1],
-                    out_channels=dec_in_channels[2],
+                    out_channels=cout,
                     **block_kwargs,
                 )
             else:
@@ -724,11 +721,20 @@ class SongUNet(nn.Module):
                 aux = tmp if aux is None else tmp + aux
             else:
                 if "in0" in name and feats is not None:
+                    assert len(x.shape) == 4  # B C H W
+                    feats_shape = x.shape
+                    if cfg.model.extend_bottleneck.concat_mode != "copy":
+                        # Features are going to be 'streched' to a custom number of channels
+                        feats_shape[1] = int(cfg.model.extend_bottleneck.concat_mode)
+                    if feats_shape[1:].numel() < feats.shape()[1:].numel():
+                        print(
+                            "WARN: Downsampling bottleneck features to less than original!"
+                        )
                     feats = F.interpolate(
                         feats[:, None, ...],
-                        size=torch.numel(x[0, ...]),
+                        size=feats_shape[1:].numel(),
                         mode="linear",
-                    ).view(x.shape)
+                    ).view(feats_shape)
                     x = torch.cat([x, feats], dim=1)
                 if x.shape[1] != block.in_channels:
                     # skip connection is pixel-aligned which is good for
@@ -756,9 +762,12 @@ class SingleImageSongUNetPredictor(nn.Module):
             emb_dim_in = 6 * cfg.cam_embd.dimension
 
         if include_feats:
-            self.dino = torch.hub.load("facebookresearch/dinov2", "dinov2_vitl14")
+            self.feat_model = torch.hub.load(
+                cfg.model.extend_bottleneck.feats.repo,
+                cfg.model.extend_bottleneck.feats.model,
+            )
         else:
-            self.dino = None
+            self.feat_model = None
         self.encoder = SongUNet(
             cfg.data.training_resolution,
             in_channels,
@@ -768,7 +777,7 @@ class SingleImageSongUNetPredictor(nn.Module):
             emb_dim_in=emb_dim_in,
             channel_mult_noise=0,
             attn_resolutions=cfg.model.attention_resolutions,
-            dec_in_multipler=(2, 1, 1) if self.dino is not None else None,
+            dec_in_multipler=(2, 1, 1) if self.feat_model is not None else None,
         )
         self.out = nn.Conv2d(
             in_channels=sum(out_channels), out_channels=sum(out_channels), kernel_size=1
@@ -786,9 +795,13 @@ class SingleImageSongUNetPredictor(nn.Module):
             start_channels += out_channel
 
     def forward(self, x, film_camera_emb=None, N_views_xa=1):
-        if self.dino is not None:
+        if self.feat_model is not None:
             with torch.no_grad():
-                feats = self.dino(CenterPadding(14)(x[:, :3, ...]))
+                feats = self.feat_model(
+                    CenterPadding(self.cfg.model.extend_bottleneck.feats.multiplier)(
+                        x[:, :3, ...]
+                    )
+                )
         else:
             feats = None
         x = self.encoder(

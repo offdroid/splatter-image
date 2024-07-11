@@ -40,6 +40,8 @@ opt:
     occluded_area: 1.0
     outline: 1.0
   compute_loss_on_condition: false
+  gan:
+    base_lr: 0.00005
 
 model:
   max_sh_degree: 1
@@ -63,7 +65,19 @@ model:
   base_dim: 128
   isotropic: false
   input_channels: 4
-
+  extend_bottleneck:
+    enabled: true
+    feats:
+      repo: "facebookresearch/dinov2"
+      model: "dinov2_vitl14"
+      multiplier: 14
+    concat_mode: 2
+    cinterm_unet_multiplier: 1
+gan:
+  enabled: true
+  sample_p: 0.5
+  noise_sigma: 0.1
+  
 logging:
   ckpt_iterations: 1000
   val_log: 5000
