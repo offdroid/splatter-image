@@ -1,7 +1,8 @@
-import torch
 import itertools
-from torch import nn
 import math
+
+import torch
+from torch import nn
 from torch.nn import functional as F
 
 # WARN: Code adapted from DINOv2 https://github.com/facebookresearch/dinov2
@@ -71,10 +72,12 @@ def setup_linear_classifier(sample_output, n, avgpool, num_classes=2):
     return linear_classifier
 
 
-class Discriminator(nn.Module):
+class DinoDiscriminator(nn.Module):
     def __init__(self, model):
         super().__init__()
-        self.dino = torch.hub.load("facebookresearch/dinov2", "dinov2_vits14")
+        self.dino = torch.hub.load(
+            "facebookresearch/dinov2", "dinov2_vits14" if model is not None else model
+        )
         self.preprocess = CenterPadding(14)
         with torch.no_grad():
             sample_output = self.dino.get_intermediate_layers(
@@ -90,3 +93,31 @@ class Discriminator(nn.Module):
         return self.head(embs)
 
 
+class Disriminator(nn.Module):
+    def __init__(self):
+        nc = 7
+        self.main = nn.Sequential(
+            # input is ``(nc) x 64 x 64``
+            nn.Conv2d(nc, ndf, 4, 2, 1, bias=False),
+            nn.LeakyReLU(0.2, inplace=True),
+            # state size. ``(ndf) x 32 x 32``
+            nn.Conv2d(ndf, ndf * 2, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ndf * 2),
+            nn.LeakyReLU(0.2, inplace=True),
+            # state size. ``(ndf*2) x 16 x 16``
+            nn.Conv2d(ndf * 2, ndf * 4, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ndf * 4),
+            nn.LeakyReLU(0.2, inplace=True),
+            # state size. ``(ndf*4) x 8 x 8``
+            nn.Conv2d(ndf * 4, ndf * 8, 4, 2, 1, bias=False),
+            nn.BatchNorm2d(ndf * 8),
+            nn.LeakyReLU(0.2, inplace=True),
+            # state size. ``(ndf*8) x 4 x 4``
+            nn.Conv2d(ndf * 8, 1, 4, 1, 0, bias=False),
+            nn.Sigmoid(),
+        )
+
+    def forward(self, x, cond_view, cond_pose):
+        return self.main(
+            torch.cat([x, cond_view, self.processes_pose(cond_pose)], dim=0)
+        )
