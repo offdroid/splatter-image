@@ -318,7 +318,9 @@ def main(cfg: DictConfig):
             rendered_images = []
             gt_images = []
             loss_weight = []
+            camera_pose = []
             b_idxes = []
+            
             for b_idx in range(data["gt_images"].shape[0]):
                 # image at index 0 is training, remaining images are targets
                 # Rendering is done sequentially because gaussian rasterization code
@@ -375,12 +377,14 @@ def main(cfg: DictConfig):
                         loss_weight.append(lw)
                     # Put in a list for a later loss computation
                     rendered_images.append(image)
-                    gt_image = data["gt_images"][b_idx, r_idx, :3]
-                    gt_images.append(gt_image)
-                    input_image = input_images[b_idx, 0, ...]
+                    gt_images.append(data["gt_images"][b_idx, r_idx, :3])
+                    camera_pose.append(data["world_view_transforms"][b_idx, r_idx])
                     b_idxes.append(b_idx)
             rendered_images = torch.stack(rendered_images, dim=0)
             gt_images = torch.stack(gt_images, dim=0)
+            print(camera_pose[0].shape)
+            camera_pose = torch.stack(camera_pose, dim=0)
+            print(camera_pose.shape)
             b_idxes = torch.LongTensor(b_idxes)
 
             if cfg.gan.enabled == True:
@@ -486,10 +490,13 @@ def main(cfg: DictConfig):
                 if (
                     iteration % cfg.logging.render_log == 0 or iteration == 1
                 ) and fabric.is_global_zero:
+                    b_idx = 0
+                    r_idx = 0 if cfg.opt.compute_loss_on_condition else cfg.data.input_images
                     wandb.log(
                         {
                             "render": wandb.Image(
-                                image.clamp(0.0, 1.0)
+                                rendered_images[b_idx, r_idx, :3, ...]
+                                .clamp(0.0, 1.0)
                                 .permute(1, 2, 0)
                                 .detach()
                                 .cpu()
@@ -501,7 +508,7 @@ def main(cfg: DictConfig):
                     wandb.log(
                         {
                             "occluded_input": wandb.Image(
-                                input_image[:3, ...]
+                                input_images[b_idx, 0, :3, ...]
                                 .permute(1, 2, 0)
                                 .detach()
                                 .cpu()
@@ -513,7 +520,7 @@ def main(cfg: DictConfig):
                     wandb.log(
                         {
                             "mask": wandb.Image(
-                                input_image[3:4, ...]
+                                input_images[b_idx, 0, 3:4, ...]
                                 .permute(1, 2, 0)
                                 .detach()
                                 .cpu()
@@ -525,7 +532,7 @@ def main(cfg: DictConfig):
                     wandb.log(
                         {
                             "gt": wandb.Image(
-                                gt_image.permute(1, 2, 0).detach().cpu().numpy()
+                                data["gt_images"][b_idx, r_idx, :3].permute(1, 2, 0).detach().cpu().numpy()
                             )
                         },
                         step=iteration,
