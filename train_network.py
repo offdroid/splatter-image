@@ -750,6 +750,7 @@ def main(cfg: DictConfig):
                 ckpt_save_dict = {
                     "iteration": iteration,
                     "optimizer_state_dict": optimizer.state_dict(),
+                    "d_optimizer_state_dict": d_optimizer.state_dict(),
                     "loss": total_loss.item(),
                     "best_PSNR": best_PSNR,
                 }
@@ -757,6 +758,7 @@ def main(cfg: DictConfig):
                     ckpt_save_dict["model_state_dict"] = ema.ema_model.state_dict()
                 else:
                     ckpt_save_dict["model_state_dict"] = gaussian_predictor.state_dict()
+                ckpt_save_dict["d_model_state_dict"] = discriminator.state_dict()
                 torch.save(ckpt_save_dict, os.path.join(vis_dir, fname_to_save))
 
             gaussian_predictor.train()

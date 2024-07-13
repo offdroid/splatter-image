@@ -42,7 +42,7 @@ opt:
     outline: 1.0
   compute_loss_on_condition: false
   gan:
-    base_lr: 0.002
+    base_lr: 0.0002
 
 model:
   max_sh_degree: 1
@@ -75,7 +75,7 @@ model:
     concat_mode: 2
     cinterm_unet_multiplier: 1
 gan:
-  enabled: true
+  enabled: false
   discriminator_occl_mask: true
   sample_p: 0.5
   
