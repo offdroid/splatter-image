@@ -10,9 +10,10 @@
 
 import os
 
-import dnnlib
 import numpy as np
 import torch
+
+import dnnlib
 
 from .. import custom_ops, misc
 

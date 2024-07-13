@@ -140,7 +140,6 @@ def modulated_conv2d(
 # ----------------------------------------------------------------------------
 
 
-@persistence.persistent_class
 class FullyConnectedLayer(torch.nn.Module):
     def __init__(
         self,
@@ -698,8 +697,10 @@ class Discriminator(torch.nn.Module):
                 or self.data_camera_mode == "ts_house"
                 or self.data_camera_mode == "ts_animal"
             ):
-                self.camera_dim = 2
-                self.camera_dim_enc = 2 + 2 * 2 * 3
+                # self.camera_dim = 2
+                # self.camera_dim_enc = 2 + 2 * 2 * 3
+                self.camera_dim = 3
+                self.camera_dim_enc = 3 + 2 * 3 * 3
 
             else:
                 raise NotImplementedError

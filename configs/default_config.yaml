@@ -42,7 +42,7 @@ opt:
     outline: 1.0
   compute_loss_on_condition: false
   gan:
-    base_lr: 0.00005
+    base_lr: 0.002
 
 model:
   max_sh_degree: 1
@@ -78,7 +78,6 @@ gan:
   enabled: true
   discriminator_occl_mask: true
   sample_p: 0.5
-  noise_sigma: 0.1
   
 logging:
   ckpt_iterations: 1000

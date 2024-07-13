@@ -19,7 +19,6 @@ import wandb
 from datasets.dataset_factory import get_dataset
 from datasets.shared_dataset import MaskedDataset
 from eval import evaluate_dataset
-from gan.discriminator import Discriminator
 from gan.get3d.discriminator import Discriminator as GET3DDiscriminator
 from gaussian_renderer import render_predicted
 from scene.gaussian_predictor import GaussianSplatPredictor
@@ -44,37 +43,53 @@ def compute_gan_loss(
     sub_n = max(int(n * cfg.gan.sample_p), 1)
 
     assert cfg.gan.enabled
-    assert fake.shape == real.shape == input.view.shape
+    assert fake.shape == real.shape
+    assert fake.shape[2:] == in_view.shape[2:]
+    assert in_view.shape[1] == 4
 
     def background_pixels(x):
         # This is not exactly perfect
         r, g, b = x[:, 0], x[:, 1], x[:, 2]
-        return r == g == b == (1.0 if cfg.data.white_background else 0.0)
+        v = 1.0 if cfg.data.white_background else 0.0
+        return torch.bitwise_and(torch.bitwise_and(r == v, g == v), b == v)[:, None]
 
-    assert in_view.shape[1] == 4
     fake_idx, real_idx = torch.randperm(n)[:sub_n], torch.randperm(n)[:sub_n]
     if not cfg.gan.discriminator_occl_mask:
         in_view = in_view[:, :RGB, ...]
-        # Add input view as another channel
-        fake = torch.cat(fake[idx], in_view[fake_idx], dim=CH)
-        real = torch.cat(real[idx], in_view[real_idx], dim=CH)
-    # Add mask channel
-    fake = torch.cat(background_pixels(fake[:, :RGB]), dim=CH)
-    real = torch.cat(background_pixels(real[:, :RGB]), dim=CH)
+    # Add input view and mask as additional channels
+    fake_unbatched_idx, real_unbatched_idx = b_idxes[fake_idx], b_idxes[real_idx]
+    fake = torch.cat(
+        [
+            fake[fake_idx],
+            in_view[fake_unbatched_idx],
+            background_pixels(fake[fake_idx, :RGB]),
+        ],
+        dim=CH,
+    )
+    real = torch.cat(
+        [
+            real[real_idx],
+            in_view[real_unbatched_idx],
+            background_pixels(real[real_idx, :RGB]),
+        ],
+        dim=CH,
+    )
     # The channel dimension now is composed of RGB + RGB of input view* + mask of RGB
-    # *depends on cfg
+    # *depending on `cfg RGBA where A is the occlusion mask
     fake_c, real_c = camera_pose[fake_idx], camera_pose[real_idx]
 
     # Discriminator
-    y, y_mask = d_net(img=torch.cat([fake, real]), c=torch.cat[fake_c, real_c])[:, 0]
+    y, y_mask = d_net(
+        img=torch.cat([fake.detach(), real]), c=torch.cat([fake_c, real_c])
+    )
     y_hat = torch.cat([label_fake(sub_n), label_real(sub_n)]).to(fake.device)
-    d_loss = criterion(y, y_hat)
-    d_loss_mask = criterion(y_mask, y_hat)
+    d_loss = criterion(y[:, 0], y_hat)
+    d_loss_mask = criterion(y_mask[:, 0], y_hat)
     # Generator, note that labels are swapped
-    g_y, g_y_mask = netD(img=fake, c=fake_c)
+    g_y, g_y_mask = d_net(img=fake, c=fake_c)
     g_y_hat = label_real(sub_n).to(fake.device)
-    g_loss = criterion(g_y, g_y_hat)
-    g_loss_mask = criterion(g_y_mask, g_y_hat)
+    g_loss = criterion(g_y[:, 0], g_y_hat)
+    g_loss_mask = criterion(g_y_mask[:, 0], g_y_hat)
 
     with torch.no_grad():
         loss_dict = {
@@ -82,8 +97,8 @@ def compute_gan_loss(
             "d_loss_rgb_real": d_loss[sub_n:].mean().item(),
             "d_loss_mask_fake": d_loss_mask[:sub_n].mean().item(),
             "d_loss_mask_real": d_loss_mask[sub_n:].mean().item(),
-            "d_acc_rgb": binary_accuracy(y, y_hat),
-            "d_acc_mask": binary_accuracy(y_mask, y_hat),
+            "d_acc_rgb": binary_accuracy(y[:, 0], y_hat),
+            "d_acc_mask": binary_accuracy(y_mask[:, 0], y_hat),
         }
     return {
         **loss_dict,
@@ -159,15 +174,21 @@ def main(cfg: DictConfig):
         assert cfg.opt.lambda_g_gan > 0.0
         # Input the occluded input view as additional channels to
         discriminator = GET3DDiscriminator(
-            c_dim=2, img_resolution=cfg.data.training_resolution, img_channels=3 * 2
+            c_dim=0,
+            img_resolution=cfg.data.training_resolution,
+            img_channels=3 * 2 + 1,
+            add_camera_cond=True,
+            data_camera_mode="shapenet_chair",
         ).to(
             "cuda"
         )  # Discriminator("tmp").to("cuda")
         d_optimizer = torch.optim.Adam(
-            {
-                "params": discriminator.parameters(),
-                "lr": cfg.opt.gan.base_lr,
-            },
+            [
+                {
+                    "params": discriminator.parameters(),
+                    "lr": cfg.opt.gan.base_lr,
+                }
+            ],
             lr=0.0,
             eps=1e-15,
             betas=cfg.opt.betas,
@@ -400,13 +421,18 @@ def main(cfg: DictConfig):
                     # Put in a list for a later loss computation
                     rendered_images.append(image)
                     gt_images.append(data["gt_images"][b_idx, r_idx, :3])
-                    camera_pose.append(data["world_view_transforms"][b_idx, r_idx])
+                    from utils.rotation_conversions import matrix_to_euler_angles
+
+                    camera_pose.append(
+                        matrix_to_euler_angles(
+                            data["view_to_world_transforms"][b_idx, r_idx][:3, :3],
+                            "XYZ",
+                        )
+                    )
                     b_idxes.append(b_idx)
             rendered_images = torch.stack(rendered_images, dim=0)
             gt_images = torch.stack(gt_images, dim=0)
-            print("camera pose1", camera_pose[0].shape)
             camera_pose = torch.stack(camera_pose, dim=0)
-            print("camera pose2", camera_pose.shape)
             b_idxes = torch.LongTensor(b_idxes)
             loss_weight = (
                 torch.stack(loss_weight, dim=0) if cfg.opt.weight_loss.enabled else None
@@ -416,16 +442,17 @@ def main(cfg: DictConfig):
                 gan_loss = compute_gan_loss(
                     cfg,
                     discriminator,
-                    bce,
-                    rendered_images,
-                    gt_images,
-                    camera_pose,
-                    b_idxes,
+                    criterion=bce,
+                    fake=rendered_images,
+                    real=gt_images,
+                    in_view=input_images[:, 0, ...],
+                    camera_pose=camera_pose,
+                    b_idxes=b_idxes,
                 )
                 d_gan_loss = (gan_loss["d_loss_rgb"] + gan_loss["d_loss_mask"]) / 2.0
                 g_gan_loss = (gan_loss["g_loss_rgb"] + gan_loss["g_loss_mask"]) / 2.0
                 wandb.log(
-                    {"d_gan_loss": d_gan_loss, "g_gan_loss": g_gan_loss, **gan_metrics},
+                    {"d_gan_loss": d_gan_loss, "g_gan_loss": g_gan_loss, **gan_loss},
                     step=iteration,
                 )
             else:
@@ -452,14 +479,14 @@ def main(cfg: DictConfig):
                     iteration, iteration / cfg.opt.iterations, fabric.global_rank
                 )
             )
-            fabric.backward(total_loss)
             d_gan_loss.backward()
+            d_optimizer.step()
+            d_optimizer.zero_grad()
+            fabric.backward(total_loss)
 
             # ============ Optimization ===============
             optimizer.step()
             optimizer.zero_grad()
-            d_optimizer.step()
-            d_optimizer.zero_grad()
             print(
                 "finished opt {} ({}) on process {}".format(
                     iteration, iteration / cfg.opt.iterations, fabric.global_rank
