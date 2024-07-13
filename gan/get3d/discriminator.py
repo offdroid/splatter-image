@@ -9,7 +9,7 @@
 import numpy as np
 import torch
 
-from torch_utils import misc, persistence
+from torch_utils import misc
 from torch_utils.ops import bias_act, conv2d_resample, fma, upfirdn2d
 
 
@@ -191,7 +191,6 @@ class FullyConnectedLayer(torch.nn.Module):
 # ----------------------------------------------------------------------------
 
 
-@persistence.persistent_class
 class Conv2dLayer(torch.nn.Module):
     def __init__(
         self,
@@ -271,7 +270,6 @@ class Conv2dLayer(torch.nn.Module):
 
 
 # ----------------------------------------------------------------------------
-@persistence.persistent_class
 class MappingNetwork(torch.nn.Module):
     def __init__(
         self,
@@ -378,7 +376,6 @@ class MappingNetwork(torch.nn.Module):
 
 
 # ----------------------------------------------------------------------------
-@persistence.persistent_class
 class DiscriminatorBlock(torch.nn.Module):
     def __init__(
         self,
@@ -525,7 +522,6 @@ class DiscriminatorBlock(torch.nn.Module):
 # ----------------------------------------------------------------------------
 
 
-@persistence.persistent_class
 class MinibatchStdLayer(torch.nn.Module):
     def __init__(self, group_size, num_channels=1):
         super().__init__()
@@ -562,7 +558,6 @@ class MinibatchStdLayer(torch.nn.Module):
 # ----------------------------------------------------------------------------
 
 
-@persistence.persistent_class
 class DiscriminatorEpilogue(torch.nn.Module):
     def __init__(
         self,
@@ -656,7 +651,6 @@ class DiscriminatorEpilogue(torch.nn.Module):
 # ----------------------------------------------------------------------------
 
 
-@persistence.persistent_class
 class Discriminator(torch.nn.Module):
     def __init__(
         self,
@@ -887,4 +881,4 @@ class Discriminator(torch.nn.Module):
         return x, mask_x
 
     def extra_repr(self):
-        return f"c_dim={self.c_dim:d}, img_resolution={self.img_resolution:d}, img_channels={self.img_channels:d}"
+        return f"c_dim={self.c_dim:d}, img_resolution={self.img_resolution:d}, img_channels={self.img_channels_drgb:d}"

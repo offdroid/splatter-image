@@ -20,6 +20,7 @@ from datasets.dataset_factory import get_dataset
 from datasets.shared_dataset import MaskedDataset
 from eval import evaluate_dataset
 from gan.discriminator import Discriminator
+from gan.get3d.discriminator import Discriminator as GET3DDiscriminator
 from gaussian_renderer import render_predicted
 from scene.gaussian_predictor import GaussianSplatPredictor
 from utils.general_utils import (
@@ -32,58 +33,65 @@ from utils.general_utils import (
 from utils.loss_utils import l1_loss, l2_loss
 
 
-def train_gan(
-    cfg, netD: nn.Module, criterion, d_optimizer, g_optimizer, fake, real, b_idxes
+def compute_gan_loss(
+    cfg, d_net: nn.Module, criterion, fake, real, in_view, camera_pose, b_idxes
 ):
+    RGB = 3
+    CH = 1  # Channel dimension
+    label_fake = torch.zeros
+    label_real = torch.ones
     n = fake.shape[0]
-    assert fake.shape == real.shape
-
-    class Noise(nn.Module):
-        def __init__(self, sigma):
-            super().__init__()
-            self.sigma = sigma
-
-        def forward(self, x):
-            out = x + torch.normal(std=torch.full_like(x, fill=self.sigma))
-            return torch.clamp(out, min=0.0, max=1.0)
-
     sub_n = max(int(n * cfg.gan.sample_p), 1)
-    idx = torch.randperm(n)[:sub_n]
-    fake, real = fake[idx], real[idx]
 
-    # TODO: Why does this not work?
-    perturb = transforms.Compose(
-        [
-            transforms.ColorJitter(brightness=0.2, hue=0.2),
-            transforms.RandomVerticalFlip(),
-            transforms.RandomHorizontalFlip(),
-            Noise(sigma=cfg.gan.noise_sigma),
-        ]
-    )
-    # preds = netD(perturb(torch.cat([fake, real])))[:, 0]
-    preds = netD(torch.cat([fake, real]))[:, 0]
-    targets = torch.cat([torch.zeros(sub_n), torch.ones(sub_n)]).to(fake.device)
+    assert cfg.gan.enabled
+    assert fake.shape == real.shape == input.view.shape
 
-    d_loss = criterion(preds, targets)
-    loss = {
-        "d_loss": d_loss.mean().item(),
-        "d_loss_fake": d_loss[:sub_n].mean().item(),
-        "d_loss_real": d_loss[sub_n:].mean().item(),
-        "d_acc": binary_accuracy(preds, targets),
+    def background_pixels(x):
+        # This is not exactly perfect
+        r, g, b = x[:, 0], x[:, 1], x[:, 2]
+        return r == g == b == (1.0 if cfg.data.white_background else 0.0)
+
+    assert in_view.shape[1] == 4
+    fake_idx, real_idx = torch.randperm(n)[:sub_n], torch.randperm(n)[:sub_n]
+    if not cfg.gan.discriminator_occl_mask:
+        in_view = in_view[:, :RGB, ...]
+        # Add input view as another channel
+        fake = torch.cat(fake[idx], in_view[fake_idx], dim=CH)
+        real = torch.cat(real[idx], in_view[real_idx], dim=CH)
+    # Add mask channel
+    fake = torch.cat(background_pixels(fake[:, :RGB]), dim=CH)
+    real = torch.cat(background_pixels(real[:, :RGB]), dim=CH)
+    # The channel dimension now is composed of RGB + RGB of input view* + mask of RGB
+    # *depends on cfg
+    fake_c, real_c = camera_pose[fake_idx], camera_pose[real_idx]
+
+    # Discriminator
+    y, y_mask = d_net(img=torch.cat([fake, real]), c=torch.cat[fake_c, real_c])[:, 0]
+    y_hat = torch.cat([label_fake(sub_n), label_real(sub_n)]).to(fake.device)
+    d_loss = criterion(y, y_hat)
+    d_loss_mask = criterion(y_mask, y_hat)
+    # Generator, note that labels are swapped
+    g_y, g_y_mask = netD(img=fake, c=fake_c)
+    g_y_hat = label_real(sub_n).to(fake.device)
+    g_loss = criterion(g_y, g_y_hat)
+    g_loss_mask = criterion(g_y_mask, g_y_hat)
+
+    with torch.no_grad():
+        loss_dict = {
+            "d_loss_rgb_fake": d_loss[:sub_n].mean().item(),
+            "d_loss_rgb_real": d_loss[sub_n:].mean().item(),
+            "d_loss_mask_fake": d_loss_mask[:sub_n].mean().item(),
+            "d_loss_mask_real": d_loss_mask[sub_n:].mean().item(),
+            "d_acc_rgb": binary_accuracy(y, y_hat),
+            "d_acc_mask": binary_accuracy(y_mask, y_hat),
+        }
+    return {
+        **loss_dict,
+        "d_loss_rgb": d_loss.mean(),
+        "d_loss_mask": d_loss_mask.mean(),
+        "g_loss_rgb": g_loss.mean(),
+        "g_loss_mask": g_loss_mask.mean(),
     }
-    d_loss.mean().backward()
-    d_optimizer.step()
-    d_optimizer.zero_grad()
-
-    # Train the generator to learn the opposite of discriminator, i.e. labels are switched
-    preds = netD(fake)[:, 0]
-    targets = torch.ones(sub_n).to(fake.device)
-    g_loss = criterion(preds, targets)
-    g_loss.mean().backward()
-    g_optimizer.step()
-    g_optimizer.zero_grad()
-    # Next don't do the optimization step just yet. Combine (weighted) with reconstruction loss
-    return loss
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="default_config")
@@ -148,9 +156,22 @@ def main(cfg: DictConfig):
     optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15, betas=cfg.opt.betas)
 
     if cfg.gan.enabled == True:
-        discriminator = Discriminator("tmp").to("cuda")
-        d_optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15, betas=cfg.opt.betas)
-        g_optimizer = optimizer  # TODO: Change this
+        assert cfg.opt.lambda_g_gan > 0.0
+        # Input the occluded input view as additional channels to
+        discriminator = GET3DDiscriminator(
+            c_dim=2, img_resolution=cfg.data.training_resolution, img_channels=3 * 2
+        ).to(
+            "cuda"
+        )  # Discriminator("tmp").to("cuda")
+        d_optimizer = torch.optim.Adam(
+            {
+                "params": discriminator.parameters(),
+                "lr": cfg.opt.gan.base_lr,
+            },
+            lr=0.0,
+            eps=1e-15,
+            betas=cfg.opt.betas,
+        )
 
     # Resuming training
     if fabric.is_global_zero:
@@ -217,7 +238,8 @@ def main(cfg: DictConfig):
         lpips_fn = fabric.to_device(lpips_lib.LPIPS(net="vgg"))
     lambda_lpips = cfg.opt.lambda_lpips
     lambda_l12 = 1.0 - lambda_lpips
-    gan_loss = nn.BCEWithLogitsLoss(reduction="none")
+    lambda_g_gan = cfg.opt.lambda_g_gan
+    bce = nn.BCEWithLogitsLoss(reduction="none")
 
     bg_color = [1, 1, 1] if cfg.data.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32)
@@ -320,7 +342,7 @@ def main(cfg: DictConfig):
             loss_weight = []
             camera_pose = []
             b_idxes = []
-            
+
             for b_idx in range(data["gt_images"].shape[0]):
                 # image at index 0 is training, remaining images are targets
                 # Rendering is done sequentially because gaussian rasterization code
@@ -382,30 +404,32 @@ def main(cfg: DictConfig):
                     b_idxes.append(b_idx)
             rendered_images = torch.stack(rendered_images, dim=0)
             gt_images = torch.stack(gt_images, dim=0)
-            print(camera_pose[0].shape)
+            print("camera pose1", camera_pose[0].shape)
             camera_pose = torch.stack(camera_pose, dim=0)
-            print(camera_pose.shape)
+            print("camera pose2", camera_pose.shape)
             b_idxes = torch.LongTensor(b_idxes)
-
-            if cfg.gan.enabled == True:
-                d_metrics = train_gan(
-                    cfg,
-                    discriminator,
-                    gan_loss,
-                    d_optimizer,
-                    g_optimizer,
-                    rendered_images,
-                    gt_images,
-                    b_idxes,
-                )
-                wandb.log(
-                    {f"d_{k}": v for k, v in d_metrics.items()},
-                    step=iteration,
-                )
-
             loss_weight = (
                 torch.stack(loss_weight, dim=0) if cfg.opt.weight_loss.enabled else None
             )
+
+            if cfg.gan.enabled == True:
+                gan_loss = compute_gan_loss(
+                    cfg,
+                    discriminator,
+                    bce,
+                    rendered_images,
+                    gt_images,
+                    camera_pose,
+                    b_idxes,
+                )
+                d_gan_loss = (gan_loss["d_loss_rgb"] + gan_loss["d_loss_mask"]) / 2.0
+                g_gan_loss = (gan_loss["g_loss_rgb"] + gan_loss["g_loss_mask"]) / 2.0
+                wandb.log(
+                    {"d_gan_loss": d_gan_loss, "g_gan_loss": g_gan_loss, **gan_metrics},
+                    step=iteration,
+                )
+            else:
+                gan_loss = 0.0
 
             # Loss computation
             l12_loss_sum = loss_fn(rendered_images, gt_images, loss_weight)
@@ -414,7 +438,11 @@ def main(cfg: DictConfig):
                     lpips_fn(rendered_images * 2 - 1, gt_images * 2 - 1),
                 )
 
-            total_loss = l12_loss_sum * lambda_l12 + lpips_loss_sum * lambda_lpips
+            total_loss = (
+                l12_loss_sum * lambda_l12
+                + lpips_loss_sum * lambda_lpips
+                + g_gan_loss * lambda_g_gan
+            )
             if cfg.data.category == "hydrants" or cfg.data.category == "teddybears":
                 assert False
 
@@ -425,10 +453,13 @@ def main(cfg: DictConfig):
                 )
             )
             fabric.backward(total_loss)
+            d_gan_loss.backward()
 
             # ============ Optimization ===============
             optimizer.step()
             optimizer.zero_grad()
+            d_optimizer.step()
+            d_optimizer.zero_grad()
             print(
                 "finished opt {} ({}) on process {}".format(
                     iteration, iteration / cfg.opt.iterations, fabric.global_rank
@@ -491,7 +522,11 @@ def main(cfg: DictConfig):
                     iteration % cfg.logging.render_log == 0 or iteration == 1
                 ) and fabric.is_global_zero:
                     b_idx = 0
-                    r_idx = 0 if cfg.opt.compute_loss_on_condition else cfg.data.input_images
+                    r_idx = (
+                        0
+                        if cfg.opt.compute_loss_on_condition
+                        else cfg.data.input_images
+                    )
                     wandb.log(
                         {
                             "render": wandb.Image(
@@ -532,7 +567,11 @@ def main(cfg: DictConfig):
                     wandb.log(
                         {
                             "gt": wandb.Image(
-                                data["gt_images"][b_idx, r_idx, :3].permute(1, 2, 0).detach().cpu().numpy()
+                                data["gt_images"][b_idx, r_idx, :3]
+                                .permute(1, 2, 0)
+                                .detach()
+                                .cpu()
+                                .numpy()
                             )
                         },
                         step=iteration,

@@ -30,6 +30,7 @@ opt:
     update_after_step: 100
     beta: 0.9999
   lambda_lpips: 0.0
+  lambda_g_gan: 0.5
   pretrained_ckpt: null
   mask_p: 0.0
   freeze_decoder: false
@@ -75,6 +76,7 @@ model:
     cinterm_unet_multiplier: 1
 gan:
   enabled: true
+  discriminator_occl_mask: true
   sample_p: 0.5
   noise_sigma: 0.1
   
@@ -83,4 +85,4 @@ logging:
   val_log: 5000
   loss_log: 10
   loop_log: 5000
-  render_log: 1000
+  render_log: 500
