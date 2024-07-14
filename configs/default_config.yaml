@@ -9,6 +9,7 @@ general:
   random_seed: 0
   num_devices: 1
   mixed_precision: false
+  save_pretrain_ckpt_exit: false
 data:
   training_resolution: 128
   subset: -1
@@ -40,7 +41,7 @@ opt:
     global_coef: 0.05
     occluded_area: 1.0
     outline: 1.0
-  compute_loss_on_condition: false
+  compute_loss_on_input_views: false
   gan:
     base_lr: 0.0002
 

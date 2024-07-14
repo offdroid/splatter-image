@@ -41,6 +41,10 @@ def compute_gan_loss(
     label_real = torch.ones
     n = fake.shape[0]
     sub_n = max(int(n * cfg.gan.sample_p), 1)
+    if sub_n % 4 != 0:
+        # For reason GET3D needs the number of elements to be a multiple of 4
+        sub_n = ((sub_n // 4) + 1) * 4
+    assert sub_n <= n
 
     assert cfg.gan.enabled
     assert fake.shape == real.shape
@@ -298,13 +302,29 @@ def main(cfg: DictConfig):
     )
 
     test_dataset = MaskedDataset(
-        cfg, get_dataset(cfg, "vis"), return_superimposed_input=True
+        cfg, get_dataset(cfg, "vis"), return_superimposed_input=True, shuffle=False
     )
-    test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=True)
+    test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
     # distribute model and training dataset
     gaussian_predictor, optimizer = fabric.setup(gaussian_predictor, optimizer)
     dataloader = fabric.setup_dataloaders(dataloader)
+
+    if cfg.general.save_pretrain_ckpt_exit == True:
+        ckpt_save_dict = {
+            "iteration": 0,
+            "optimizer_state_dict": optimizer.state_dict(),
+            # "d_optimizer_state_dict": d_optimizer.state_dict(),
+            "loss": float("inf"),
+            "best_PSNR": 0.0,
+        }
+        if cfg.opt.ema.use:
+            ckpt_save_dict["model_state_dict"] = ema.ema_model.state_dict()
+        else:
+            ckpt_save_dict["model_state_dict"] = gaussian_predictor.state_dict()
+        torch.save(ckpt_save_dict, os.path.join(vis_dir, "pretraining_checkpoint.pth"))
+        print("Saved to pretraining_checkpoint.pth")
+        quit()
 
     gaussian_predictor.train()
     print(f"Training dataset size = {len(dataloader)}")
@@ -372,7 +392,7 @@ def main(cfg: DictConfig):
                     k: v[b_idx].contiguous() for k, v in gaussian_splats.items()
                 }
                 for r_idx in range(
-                    0 if cfg.opt.compute_loss_on_condition else cfg.data.input_images,
+                    0 if cfg.opt.compute_loss_on_input_views else cfg.data.input_images,
                     data["gt_images"].shape[1],
                 ):
                     if "focals_pixels" in data.keys():
@@ -411,8 +431,13 @@ def main(cfg: DictConfig):
                             )
                             n_weights += 1
                         if n_weights > 0:
+                            offset = (
+                                cfg.opt.weight_loss.offset_input_views
+                                if r_idx < cfg.data.input_images
+                                else cfg.opt.weight_loss.offset
+                            )
                             lw = (
-                                cfg.opt.weight_loss.offset
+                                offset
                                 + lw / n_weights * cfg.opt.weight_loss.global_coef
                             )
                         else:
@@ -451,12 +476,9 @@ def main(cfg: DictConfig):
                 )
                 d_gan_loss = (gan_loss["d_loss_rgb"] + gan_loss["d_loss_mask"]) / 2.0
                 g_gan_loss = (gan_loss["g_loss_rgb"] + gan_loss["g_loss_mask"]) / 2.0
-                wandb.log(
-                    {"d_gan_loss": d_gan_loss, "g_gan_loss": g_gan_loss, **gan_loss},
-                    step=iteration,
-                )
             else:
-                gan_loss = 0.0
+                g_gan_loss = 0.0
+                gan_loss = {}
 
             # Loss computation
             l12_loss_sum = loss_fn(rendered_images, gt_images, loss_weight)
@@ -465,6 +487,10 @@ def main(cfg: DictConfig):
                     lpips_fn(rendered_images * 2 - 1, gt_images * 2 - 1),
                 )
 
+            with torch.no_grad():
+                total_loss_wo_gan = (
+                    l12_loss_sum * lambda_l12 + lpips_loss_sum * lambda_lpips
+                )
             total_loss = (
                 l12_loss_sum * lambda_l12
                 + lpips_loss_sum * lambda_lpips
@@ -479,12 +505,14 @@ def main(cfg: DictConfig):
                     iteration, iteration / cfg.opt.iterations, fabric.global_rank
                 )
             )
-            d_gan_loss.backward()
-            d_optimizer.step()
-            d_optimizer.zero_grad()
-            fabric.backward(total_loss)
 
             # ============ Optimization ===============
+            if cfg.gan.enabled == True:
+                d_gan_loss.backward()
+                d_optimizer.step()
+                d_optimizer.zero_grad()
+            fabric.backward(total_loss)
+
             optimizer.step()
             optimizer.zero_grad()
             print(
@@ -508,7 +536,15 @@ def main(cfg: DictConfig):
             with torch.no_grad():
                 if iteration % cfg.logging.loss_log == 0 and fabric.is_global_zero:
                     wandb.log(
-                        {"training_loss": np.log10(total_loss.item() + 1e-8)},
+                        {
+                            "training_loss": np.log10(total_loss.item() + 1e-8),
+                            "training_loss_wo_gan": np.log10(
+                                total_loss_wo_gan.item() + 1e-8
+                            ),
+                            "d_gan_loss": d_gan_loss,
+                            "g_gan_loss": g_gan_loss,
+                            **gan_loss,
+                        },
                         step=iteration,
                     )
                     if cfg.opt.lambda_lpips != 0:
@@ -551,13 +587,13 @@ def main(cfg: DictConfig):
                     b_idx = 0
                     r_idx = (
                         0
-                        if cfg.opt.compute_loss_on_condition
+                        if cfg.opt.compute_loss_on_input_views
                         else cfg.data.input_images
                     )
                     wandb.log(
                         {
                             "render": wandb.Image(
-                                rendered_images[b_idx, r_idx, :3, ...]
+                                rendered_images[b_idx * 4 + r_idx, :3, ...]
                                 .clamp(0.0, 1.0)
                                 .permute(1, 2, 0)
                                 .detach()

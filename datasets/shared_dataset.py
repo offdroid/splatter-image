@@ -50,16 +50,20 @@ class SharedDataset(Dataset):
 
 
 class MaskedDataset(SharedDataset):
-    def __init__(self, cfg, dataset, return_superimposed_input=False) -> None:
+    def __init__(
+        self, cfg, dataset, return_superimposed_input=False, shuffle=True
+    ) -> None:
         super().__init__()
         self.cfg = cfg
         self._ret_input_data = return_superimposed_input
 
         self.data = dataset
+        self._shuffle = shuffle
         self.reshuffle()
 
     def reshuffle(self):
-        self.overlay_map = torch.randperm(len(self.data))
+        if self._shuffle:
+            self.overlay_map = torch.randperm(len(self.data))
 
     def __len__(self):
         return len(self.data)

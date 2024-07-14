@@ -529,6 +529,7 @@ class SongUNet(nn.Module):
         assert decoder_type in ["standard", "skip"]
 
         super().__init__()
+        self.cfg = cfg
         self.label_dropout = label_dropout
         self.emb_dim_in = emb_dim_in
         if emb_dim_in > 0:
@@ -626,12 +627,12 @@ class SongUNet(nn.Module):
         if cfg.model.extend_bottleneck.enabled == True:
             dec_in_channels = [
                 cout,
-                cfg.model.extend_bottleneck.cinterm_unet_multiplier,
+                cout * cfg.model.extend_bottleneck.cinterm_unet_multiplier,
             ]
             if cfg.model.extend_bottleneck.concat_mode == "copy":
                 dec_in_channels[0] *= 2
             else:
-                dec_in_channels[0] += int(cfg.model.extend_bottleneck.concat_mode)
+                dec_in_channels[0] += int(cfg.model.extend_bottleneck.concat_mode) * 32
         else:
             dec_in_channels = [cout, cout]
 
@@ -733,10 +734,12 @@ class SongUNet(nn.Module):
                     feats_shape = x.shape
                     if self.cfg.model.extend_bottleneck.concat_mode != "copy":
                         # Features are going to be 'streched' to a custom number of channels
-                        feats_shape[1] = int(
-                            self.cfg.model.extend_bottleneck.concat_mode
+                        feats_shape = list(feats_shape)
+                        feats_shape[1] = (
+                            int(self.cfg.model.extend_bottleneck.concat_mode) * 32
                         )
-                    if feats_shape[1:].numel() < feats.shape()[1:].numel():
+                        feats_shape = torch.Size(feats_shape)
+                    if feats_shape[1:].numel() < feats.shape[1:].numel():
                         print(
                             "WARN: Downsampling bottleneck features to less than original!"
                         )
@@ -776,6 +779,8 @@ class SingleImageSongUNetPredictor(nn.Module):
                 cfg.model.extend_bottleneck.feats.repo,
                 cfg.model.extend_bottleneck.feats.model,
             )
+            for param in self.feat_model.parameters():
+                param.requires_grad = False
         else:
             self.feat_model = None
         self.encoder = SongUNet(
