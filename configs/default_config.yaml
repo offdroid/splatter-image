@@ -16,6 +16,7 @@ data:
   input_images: 1
   origin_distances: false
   erase_occlusion: false
+  empty_overlay: False
 opt:
   iterations: 800001
   base_lr: 0.00005
@@ -43,7 +44,7 @@ opt:
     outline: 1.0
   compute_loss_on_input_views: false
   gan:
-    base_lr: 0.0002
+    base_lr: 0.001
 
 model:
   max_sh_degree: 1
@@ -71,9 +72,10 @@ model:
     enabled: false
     feats:
       repo: "facebookresearch/dinov2"
-      model: "dinov2_vitl14"
+      model: "dinov2_vitb14"
       multiplier: 14
-    concat_mode: 2
+      apply_occlusion_mask: true
+    concat_mode: 4
     cinterm_unet_multiplier: 1
 gan:
   enabled: false

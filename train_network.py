@@ -1,5 +1,6 @@
 import glob
 import os
+import time
 from functools import partial
 from itertools import chain
 
@@ -278,6 +279,7 @@ def main(cfg: DictConfig):
         persistent_workers = False
 
     dataset = MaskedDataset(cfg, get_dataset(cfg, "train"))
+    dataset.reshuffle(seed=cfg.general.random_seed)
     dataloader = DataLoader(
         dataset,
         batch_size=cfg.opt.batch_size,
@@ -314,7 +316,9 @@ def main(cfg: DictConfig):
         ckpt_save_dict = {
             "iteration": 0,
             "optimizer_state_dict": optimizer.state_dict(),
-            # "d_optimizer_state_dict": d_optimizer.state_dict(),
+            "d_optimizer_state_dict": (
+                d_optimizer.state_dict() if cfg.gan.enabled else None
+            ),
             "loss": float("inf"),
             "best_PSNR": 0.0,
         }
@@ -337,13 +341,20 @@ def main(cfg: DictConfig):
         (cfg.opt.iterations + 1 - first_iter) // len(dataloader) + 1
     ):
         dataloader.sampler.set_epoch(num_epoch)
+        print(f"Starting epoch {num_epoch}")
 
+        time_start = time.time()
+        last_epoch_iteration = iteration
+        dataloader.dataset.reshuffle(seed=cfg.general.random_seed + num_epoch)
         for data, overlay_data, input_data in dataloader:
             iteration += 1
 
             print(
-                "starting iteration {} -> {} on process {}".format(
-                    iteration, iteration / cfg.opt.iterations, fabric.global_rank
+                "starting iteration {} on process {}; {} iter/sec".format(
+                    iteration,
+                    fabric.global_rank,
+                    (time.time() - time_start)
+                    / (iteration - last_epoch_iteration + 1.19209e-07),
                 )
             )
 
@@ -355,15 +366,7 @@ def main(cfg: DictConfig):
                     assert False
                 else:
                     focals_pixels_pred = None
-                    input_images = input_data  # torch.cat(
-                    #    [
-                    #        transforms.ColorJitter(brightness=0.0, hue=0.0)(
-                    #            input_data[:, :, :3]
-                    #        ),
-                    #        input_data[:, :, 3:4],
-                    #    ],
-                    #    dim=2,
-                    # )
+                    input_images = input_data
                     input_images = adjust_channels(cfg, input_images)
 
             gaussian_splats = gaussian_predictor(
@@ -438,7 +441,9 @@ def main(cfg: DictConfig):
                             )
                             lw = (
                                 offset
-                                + lw / n_weights * cfg.opt.weight_loss.global_coef
+                                + lw
+                                / max(1, n_weights)
+                                * cfg.opt.weight_loss.global_coef
                             )
                         else:
                             lw = torch.ones_like(lw)
@@ -476,6 +481,11 @@ def main(cfg: DictConfig):
                 )
                 d_gan_loss = (gan_loss["d_loss_rgb"] + gan_loss["d_loss_mask"]) / 2.0
                 g_gan_loss = (gan_loss["g_loss_rgb"] + gan_loss["g_loss_mask"]) / 2.0
+                gan_loss = {
+                    "d_gan_loss": d_gan_loss,
+                    "g_gan_loss": g_gan_loss,
+                    **gan_loss,
+                }
             else:
                 g_gan_loss = 0.0
                 gan_loss = {}
@@ -541,8 +551,6 @@ def main(cfg: DictConfig):
                             "training_loss_wo_gan": np.log10(
                                 total_loss_wo_gan.item() + 1e-8
                             ),
-                            "d_gan_loss": d_gan_loss,
-                            "g_gan_loss": g_gan_loss,
                             **gan_loss,
                         },
                         step=iteration,
@@ -786,7 +794,9 @@ def main(cfg: DictConfig):
                 ckpt_save_dict = {
                     "iteration": iteration,
                     "optimizer_state_dict": optimizer.state_dict(),
-                    "d_optimizer_state_dict": d_optimizer.state_dict(),
+                    "d_optimizer_state_dict": (
+                        d_optimizer.state_dict() if cfg.gan.enabled else None
+                    ),
                     "loss": total_loss.item(),
                     "best_PSNR": best_PSNR,
                 }
@@ -794,7 +804,9 @@ def main(cfg: DictConfig):
                     ckpt_save_dict["model_state_dict"] = ema.ema_model.state_dict()
                 else:
                     ckpt_save_dict["model_state_dict"] = gaussian_predictor.state_dict()
-                ckpt_save_dict["d_model_state_dict"] = discriminator.state_dict()
+                ckpt_save_dict["d_model_state_dict"] = (
+                    discriminator.state_dict() if cfg.gan.enabled else None
+                )
                 torch.save(ckpt_save_dict, os.path.join(vis_dir, fname_to_save))
 
             gaussian_predictor.train()

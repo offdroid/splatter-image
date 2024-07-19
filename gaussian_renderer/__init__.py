@@ -16,12 +16,14 @@ def render_predicted(pc : dict,
                      cfg, 
                      scaling_modifier = 1.0, 
                      override_color = None,
-                     focals_pixels = None):
+                     focals_pixels = None,
+                     override_resolution = None):
     """
     Render the scene as specified by pc dictionary. 
     
     Background tensor (bg_color) must be on GPU!
     """
+    height = width = int(cfg.data.training_resolution) if override_resolution is None else int(override_resolution) 
  
     # Create zero tensor. We will use it to make pytorch return gradients of the 2D (screen-space) means
     screenspace_points = torch.zeros_like(pc["xyz"], dtype=pc["xyz"].dtype, requires_grad=True, device=pc["xyz"].device) + 0
@@ -34,13 +36,13 @@ def render_predicted(pc : dict,
         tanfovx = math.tan(cfg.data.fov * np.pi / 360)
         tanfovy = math.tan(cfg.data.fov * np.pi / 360)
     else:
-        tanfovx = math.tan(0.5 * focal2fov(focals_pixels[0].item(), cfg.data.training_resolution))
-        tanfovy = math.tan(0.5 * focal2fov(focals_pixels[1].item(), cfg.data.training_resolution))
+        tanfovx = math.tan(0.5 * focal2fov(focals_pixels[0].item(), height))
+        tanfovy = math.tan(0.5 * focal2fov(focals_pixels[1].item(), width))
 
     # Set up rasterization configuration
     raster_settings = GaussianRasterizationSettings(
-        image_height=int(cfg.data.training_resolution),
-        image_width=int(cfg.data.training_resolution),
+        image_height=height,
+        image_width=width,
         tanfovx=tanfovx,
         tanfovy=tanfovy,
         bg=bg_color,

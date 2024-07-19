@@ -93,7 +93,7 @@ class NMRDataset(SharedDataset):
                 )
             )
 
-        self.all_objs = all_objs
+        self.all_objs = sorted(all_objs, key=lambda x: x[1])
 
         self._coord_trans_world = torch.tensor(
             [[1, 0, 0, 0], [0, 0, -1, 0], [0, 1, 0, 0], [0, 0, 0, 1]],

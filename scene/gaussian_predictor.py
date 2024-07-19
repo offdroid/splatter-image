@@ -624,10 +624,10 @@ class SongUNet(nn.Module):
             block.out_channels for name, block in self.enc.items() if "aux" not in name
         ]
 
-        if cfg.model.extend_bottleneck.enabled == True:
+        if hasattr(cfg.model, "extend_bottleneck") and cfg.model.extend_bottleneck.enabled == True:
             dec_in_channels = [
                 cout,
-                cout * cfg.model.extend_bottleneck.cinterm_unet_multiplier,
+                cout * int(cfg.model.extend_bottleneck.cinterm_unet_multiplier),
             ]
             if cfg.model.extend_bottleneck.concat_mode == "copy":
                 dec_in_channels[0] *= 2
@@ -641,6 +641,13 @@ class SongUNet(nn.Module):
         for level, mult in reversed(list(enumerate(channel_mult))):
             res = img_resolution >> level
             if level == len(channel_mult) - 1:
+                if hasattr(cfg.model, "extend_bottleneck") and cfg.model.extend_bottleneck.enabled == True:
+                    self.dec["reduce_dim"] = nn.Sequential(
+                        nn.Conv2d(768, dec_in_channels[0] - cout, kernel_size=1),
+                        nn.BatchNorm2d(dec_in_channels[0] - cout),
+                        nn.ReLU(inplace=True),
+                    )
+                    self._feats_res = res
                 self.dec[f"{res}x{res}_in0"] = UNetBlock(
                     in_channels=dec_in_channels[0],
                     out_channels=dec_in_channels[1],
@@ -727,27 +734,22 @@ class SongUNet(nn.Module):
             elif "aux_conv" in name:
                 tmp = block(silu(tmp), N_views_xa)
                 aux = tmp if aux is None else tmp + aux
+            elif "reduce_dim" in name:
+                pass
             else:
                 if "in0" in name and feats is not None:
                     assert self.cfg.model.extend_bottleneck.enabled == True
                     assert len(x.shape) == 4  # B C H W
-                    feats_shape = x.shape
-                    if self.cfg.model.extend_bottleneck.concat_mode != "copy":
-                        # Features are going to be 'streched' to a custom number of channels
-                        feats_shape = list(feats_shape)
-                        feats_shape[1] = (
-                            int(self.cfg.model.extend_bottleneck.concat_mode) * 32
-                        )
-                        feats_shape = torch.Size(feats_shape)
-                    if feats_shape[1:].numel() < feats.shape[1:].numel():
-                        print(
-                            "WARN: Downsampling bottleneck features to less than original!"
-                        )
+
+                    feats = feats.permute(0, 3, 1, 2)
+                    feats = self.dec["reduce_dim"](feats)
+                    assert self._feats_res == 8
                     feats = F.interpolate(
-                        feats[:, None, ...],
-                        size=feats_shape[1:].numel(),
-                        mode="linear",
-                    ).view(feats_shape)
+                        feats,
+                        size=(self._feats_res, self._feats_res),
+                        mode="bilinear",
+                        align_corners=True,
+                    )
                     x = torch.cat([x, feats], dim=1)
                 if x.shape[1] != block.in_channels:
                     # skip connection is pixel-aligned which is good for
@@ -774,7 +776,7 @@ class SingleImageSongUNetPredictor(nn.Module):
             in_channels = cfg.model.input_channels
             emb_dim_in = 6 * cfg.cam_embd.dimension
 
-        if cfg.model.extend_bottleneck.enabled == True:
+        if hasattr(cfg.model, "extend_bottleneck") and cfg.model.extend_bottleneck.enabled == True:
             self.feat_model = torch.hub.load(
                 cfg.model.extend_bottleneck.feats.repo,
                 cfg.model.extend_bottleneck.feats.model,
@@ -812,11 +814,19 @@ class SingleImageSongUNetPredictor(nn.Module):
     def forward(self, x, film_camera_emb=None, N_views_xa=1):
         if self.feat_model is not None:
             with torch.no_grad():
-                feats = self.feat_model(
-                    CenterPadding(self.cfg.model.extend_bottleneck.feats.multiplier)(
-                        x[:, :3, ...]
+                scaled = CenterPadding(
+                    self.cfg.model.extend_bottleneck.feats.multiplier
+                )(
+                    x[:, :3, ...]
+                    * (
+                        x[:, 3:4, ...]
+                        if self.cfg.model.extend_bottleneck.feats.apply_occlusion_mask
+                        else 1.0
                     )
                 )
+                (feats,) = self.feat_model.get_intermediate_layers(scaled)
+                assert feats.shape[-1] == 768
+                feats = feats.reshape(-1, 5, 5, 768)
         else:
             feats = None
         x = self.encoder(
@@ -1146,9 +1156,14 @@ class GaussianSplatPredictor(nn.Module):
             split_network_outputs = split_network_outputs.split(
                 self.split_dimensions_with_offset, dim=1
             )
-            depth, offset, opacity, scaling, rotation, features_dc = (
-                split_network_outputs[:6]
-            )
+            (
+                depth,
+                offset,
+                opacity,
+                scaling,
+                rotation,
+                features_dc,
+            ) = split_network_outputs[:6]
             if self.cfg.model.max_sh_degree > 0:
                 features_rest = split_network_outputs[6]
 

@@ -17,13 +17,35 @@ c_dino = torch.load(
     args.path_dino, map_location=device
 )
 
-for k in c_from["model_state_dict"].keys():
-    c_dino["model_state_dict"][k] = c_from["model_state_dict"][k]
+print("same number of elements", len(c_from["model_state_dict"].keys()) == len(c_dino["model_state_dict"].keys()))
+print(set(c_from["model_state_dict"].keys()).difference(set(c_dino["model_state_dict"].keys())))
+v = set(c_dino["model_state_dict"].keys()).difference(set(c_from["model_state_dict"].keys()))
+for k in v:
     #print(k)
-
-for k in c_dino["model_state_dict"].keys():
     pass
+
+for k in c_from["model_state_dict"].keys():
+    #c_dino["model_state_dict"][k] = c_from["model_state_dict"][k]
     #print(k)
+    pass
+
+print("------")
+for k in c_dino["model_state_dict"].keys():
+    if k in c_from["model_state_dict"]:
+        if c_dino["model_state_dict"][k].shape != c_from["model_state_dict"][k].shape:
+            #print("zeroed", k)
+            #c_dino["model_state_dict"][k] = torch.zeros_like(c_dino["model_state_dict"][k])
+            pass
+            #print(k)
+            #print(c_dino["model_state_dict"][k].shape, c_from["model_state_dict"][k].shape)
+    else:
+        if "feat" not in k:
+            pass
+            #print("zeroed", k)
+            #c_dino["model_state_dict"][k] = torch.zeros_like(c_dino["model_state_dict"][k])
+
+    #print(k)
+#quit()
 
 keys = ["encoder.dec.8x8_in0.norm0.weight", "encoder.dec.8x8_in0.norm0.bias", "encoder.dec.8x8_in0.conv0.weight"]
 for k in keys:
@@ -39,7 +61,7 @@ for k in keys:
         w_dino[:, :256] = w_from
     else:
         raise RuntimeError()
-    print(k, w_dino.shape)
+    print(k, w_from.shape, w_dino.shape)
     c_dino["model_state_dict"][k] = w_dino
 
 torch.save(c_dino, args.path_to)
