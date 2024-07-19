@@ -500,6 +500,7 @@ class SongUNet(nn.Module):
         img_resolution,  # Image resolution at input/output.
         in_channels,  # Number of color channels at input.
         out_channels,  # Number of color channels at output.
+        cfg,
         emb_dim_in=0,  # Input embedding dim.
         augment_dim=0,  # Augmentation label dimensionality, 0 = no augmentation.
         model_channels=128,  # Base multiplier for the number of channels.
@@ -522,16 +523,13 @@ class SongUNet(nn.Module):
             1,
             1,
         ],  # Resampling filter: [1,1] for DDPM++, [1,3,3,1] for NCSN++.
-        skip_encoder=False,
-        dino=None,
     ):
         assert embedding_type in ["fourier", "positional"]
         assert encoder_type in ["standard", "skip", "residual"]
         assert decoder_type in ["standard", "skip"]
 
         super().__init__()
-        self.skip_encoder = skip_encoder
-        self.dino = dino
+        self.cfg = cfg
         self.label_dropout = label_dropout
         self.emb_dim_in = emb_dim_in
         if emb_dim_in > 0:
@@ -626,21 +624,40 @@ class SongUNet(nn.Module):
             block.out_channels for name, block in self.enc.items() if "aux" not in name
         ]
 
+        if hasattr(cfg.model, "extend_bottleneck") and cfg.model.extend_bottleneck.enabled == True:
+            dec_in_channels = [
+                cout,
+                cout * int(cfg.model.extend_bottleneck.cinterm_unet_multiplier),
+            ]
+            if cfg.model.extend_bottleneck.concat_mode == "copy":
+                dec_in_channels[0] *= 2
+            else:
+                dec_in_channels[0] += int(cfg.model.extend_bottleneck.concat_mode) * 32
+        else:
+            dec_in_channels = [cout, cout]
+
         # Decoder.
         self.dec = torch.nn.ModuleDict()
         for level, mult in reversed(list(enumerate(channel_mult))):
             res = img_resolution >> level
             if level == len(channel_mult) - 1:
-                print("first decoder level")
-                print(cin, cout)
+                if hasattr(cfg.model, "extend_bottleneck") and cfg.model.extend_bottleneck.enabled == True:
+                    self.dec["reduce_dim"] = nn.Sequential(
+                        nn.Conv2d(768, dec_in_channels[0] - cout, kernel_size=1),
+                        nn.BatchNorm2d(dec_in_channels[0] - cout),
+                        nn.ReLU(inplace=True),
+                    )
+                    self._feats_res = res
                 self.dec[f"{res}x{res}_in0"] = UNetBlock(
-                    in_channels=cout * 2,
-                    out_channels=cout,
+                    in_channels=dec_in_channels[0],
+                    out_channels=dec_in_channels[1],
                     attention=True,
                     **block_kwargs,
                 )
                 self.dec[f"{res}x{res}_in1"] = UNetBlock(
-                    in_channels=cout, out_channels=cout, **block_kwargs
+                    in_channels=dec_in_channels[1],
+                    out_channels=cout,
+                    **block_kwargs,
                 )
             else:
                 self.dec[f"{res}x{res}_up"] = UNetBlock(
@@ -673,10 +690,9 @@ class SongUNet(nn.Module):
                     **init,
                 )  # init_zero)
 
-    def forward(self, x, film_camera_emb=None, N_views_xa=1):
+    def forward(self, x, feats=None, film_camera_emb=None, N_views_xa=1):
+
         emb = None
-        with torch.no_grad():
-            dino_emb = self.dino(CenterPadding(14)(x[:, :3, ...]))
 
         if film_camera_emb is not None:
             if self.emb_dim_in != 1:
@@ -718,16 +734,23 @@ class SongUNet(nn.Module):
             elif "aux_conv" in name:
                 tmp = block(silu(tmp), N_views_xa)
                 aux = tmp if aux is None else tmp + aux
+            elif "reduce_dim" in name:
+                pass
             else:
-                if "in0" in name:
-                    with torch.no_grad():
-                        dino_emb = F.interpolate(
-                            dino_emb[:, None, ...],
-                            size=torch.numel(x[0, ...]),
-                            mode="nearest",
-                        )
-                        dino_emb = dino_emb.view(x.shape)
-                        x = torch.cat([x, dino_emb], dim=1)
+                if "in0" in name and feats is not None:
+                    assert self.cfg.model.extend_bottleneck.enabled == True
+                    assert len(x.shape) == 4  # B C H W
+
+                    feats = feats.permute(0, 3, 1, 2)
+                    feats = self.dec["reduce_dim"](feats)
+                    assert self._feats_res == 8
+                    feats = F.interpolate(
+                        feats,
+                        size=(self._feats_res, self._feats_res),
+                        mode="bilinear",
+                        align_corners=True,
+                    )
+                    x = torch.cat([x, feats], dim=1)
                 if x.shape[1] != block.in_channels:
                     # skip connection is pixel-aligned which is good for
                     # foreground features
@@ -753,8 +776,15 @@ class SingleImageSongUNetPredictor(nn.Module):
             in_channels = cfg.model.input_channels
             emb_dim_in = 6 * cfg.cam_embd.dimension
 
-        self.dino = torch.hub.load("facebookresearch/dinov2", "dinov2_vitl14")
-        # self.dino_2_encoder = nn.Linear(1024, 16)
+        if hasattr(cfg.model, "extend_bottleneck") and cfg.model.extend_bottleneck.enabled == True:
+            self.feat_model = torch.hub.load(
+                cfg.model.extend_bottleneck.feats.repo,
+                cfg.model.extend_bottleneck.feats.model,
+            )
+            for param in self.feat_model.parameters():
+                param.requires_grad = False
+        else:
+            self.feat_model = None
         self.encoder = SongUNet(
             cfg.data.training_resolution,
             in_channels,
@@ -764,8 +794,7 @@ class SingleImageSongUNetPredictor(nn.Module):
             emb_dim_in=emb_dim_in,
             channel_mult_noise=0,
             attn_resolutions=cfg.model.attention_resolutions,
-            skip_encoder=True,
-            dino=self.dino,
+            cfg=cfg,
         )
         self.out = nn.Conv2d(
             in_channels=sum(out_channels), out_channels=sum(out_channels), kernel_size=1
@@ -783,7 +812,26 @@ class SingleImageSongUNetPredictor(nn.Module):
             start_channels += out_channel
 
     def forward(self, x, film_camera_emb=None, N_views_xa=1):
-        x = self.encoder(x, film_camera_emb=film_camera_emb, N_views_xa=N_views_xa)
+        if self.feat_model is not None:
+            with torch.no_grad():
+                scaled = CenterPadding(
+                    self.cfg.model.extend_bottleneck.feats.multiplier
+                )(
+                    x[:, :3, ...]
+                    * (
+                        x[:, 3:4, ...]
+                        if self.cfg.model.extend_bottleneck.feats.apply_occlusion_mask
+                        else 1.0
+                    )
+                )
+                (feats,) = self.feat_model.get_intermediate_layers(scaled)
+                assert feats.shape[-1] == 768
+                feats = feats.reshape(-1, 5, 5, 768)
+        else:
+            feats = None
+        x = self.encoder(
+            x, feats=feats, film_camera_emb=film_camera_emb, N_views_xa=N_views_xa
+        )
 
         return self.out(x)
 
@@ -1108,9 +1156,14 @@ class GaussianSplatPredictor(nn.Module):
             split_network_outputs = split_network_outputs.split(
                 self.split_dimensions_with_offset, dim=1
             )
-            depth, offset, opacity, scaling, rotation, features_dc = (
-                split_network_outputs[:6]
-            )
+            (
+                depth,
+                offset,
+                opacity,
+                scaling,
+                rotation,
+                features_dc,
+            ) = split_network_outputs[:6]
             if self.cfg.model.max_sh_degree > 0:
                 features_rest = split_network_outputs[6]
 

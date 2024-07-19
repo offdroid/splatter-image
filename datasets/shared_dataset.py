@@ -1,4 +1,5 @@
 import os
+import numpy as np
 
 import torch
 from torch.utils.data import Dataset
@@ -50,26 +51,49 @@ class SharedDataset(Dataset):
 
 
 class MaskedDataset(SharedDataset):
-    def __init__(self, cfg, dataset, return_superimposed_input=False) -> None:
+    def __init__(
+        self,
+        cfg,
+        dataset,
+        return_superimposed_input=False,
+        shuffle=True,
+        empty_overlay=False,
+    ) -> None:
         super().__init__()
         self.cfg = cfg
         self._ret_input_data = return_superimposed_input
+        self._empty_overlay = empty_overlay
 
         self.data = dataset
+        self._shuffle = shuffle
         self.reshuffle()
 
-    def reshuffle(self):
-        self.overlay_map = torch.randperm(len(self.data))
+    def reshuffle(self, seed=None):
+        if self._shuffle:
+            if seed is not None:
+                rng = np.random.default_rng(seed=seed)
+                self.map = torch.from_numpy(rng.permutation(len(self.data)))
+                rng = np.random.default_rng(seed=rng.integers(2147483647, size=1))
+                self.overlay_map = torch.from_numpy(rng.permutation(len(self.data)))
+            else:
+                self.map = torch.randperm(len(self.data))
+                self.overlay_map = torch.randperm(len(self.data))
+        else:
+            self.map = torch.arange(start=0, end=len(self.data))
+            rng = np.random.default_rng(seed=32 if seed is None else seed)
+            self.overlay_map = torch.from_numpy(rng.permutation(len(self.data)))
 
     def __len__(self):
         return len(self.data)
 
     def get_example_id(self, index):
-        return self.data.get_example_id(index)
+        return self.data.get_example_id(self.map[index])
 
     def __getitem__(self, index):
-        object_data = self.data[index]
+        object_data = self.data[self.map[index]]
         overlay_data = self.data[self.overlay_map[index]]
+        if self._empty_overlay:
+            overlay_data["gt_images"] = torch.zeros_like(overlay_data["gt_images"])
 
         if self._ret_input_data:
             if len(object_data["gt_images"].shape) == 4:

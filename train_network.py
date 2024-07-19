@@ -1,5 +1,6 @@
 import glob
 import os
+import time
 from functools import partial
 from itertools import chain
 
@@ -11,22 +12,106 @@ import torchvision.transforms.v2 as transforms
 from ema_pytorch import EMA
 from lightning.fabric import Fabric
 from omegaconf import DictConfig, OmegaConf
+from torch import nn
 from torch.utils.data import DataLoader
+from torcheval.metrics.functional import binary_accuracy
 
 import wandb
 from datasets.dataset_factory import get_dataset
 from datasets.shared_dataset import MaskedDataset
 from eval import evaluate_dataset
+from gan.get3d.discriminator import Discriminator as GET3DDiscriminator
 from gaussian_renderer import render_predicted
 from scene.gaussian_predictor import GaussianSplatPredictor
 from utils.general_utils import (
-    collate_and_superimpose,
-    safe_state,
     adjust_channels,
-    occluded_area,
+    collate_and_superimpose,
     mask_to_outline,
+    occluded_area,
+    safe_state,
 )
 from utils.loss_utils import l1_loss, l2_loss
+
+
+def compute_gan_loss(
+    cfg, d_net: nn.Module, criterion, fake, real, in_view, camera_pose, b_idxes
+):
+    RGB = 3
+    CH = 1  # Channel dimension
+    label_fake = torch.zeros
+    label_real = torch.ones
+    n = fake.shape[0]
+    sub_n = max(int(n * cfg.gan.sample_p), 1)
+    if sub_n % 4 != 0:
+        # For reason GET3D needs the number of elements to be a multiple of 4
+        sub_n = ((sub_n // 4) + 1) * 4
+    assert sub_n <= n
+
+    assert cfg.gan.enabled
+    assert fake.shape == real.shape
+    assert fake.shape[2:] == in_view.shape[2:]
+    assert in_view.shape[1] == 4
+
+    def background_pixels(x):
+        # This is not exactly perfect
+        r, g, b = x[:, 0], x[:, 1], x[:, 2]
+        v = 1.0 if cfg.data.white_background else 0.0
+        return torch.bitwise_and(torch.bitwise_and(r == v, g == v), b == v)[:, None]
+
+    fake_idx, real_idx = torch.randperm(n)[:sub_n], torch.randperm(n)[:sub_n]
+    if not cfg.gan.discriminator_occl_mask:
+        in_view = in_view[:, :RGB, ...]
+    # Add input view and mask as additional channels
+    fake_unbatched_idx, real_unbatched_idx = b_idxes[fake_idx], b_idxes[real_idx]
+    fake = torch.cat(
+        [
+            fake[fake_idx],
+            in_view[fake_unbatched_idx],
+            background_pixels(fake[fake_idx, :RGB]),
+        ],
+        dim=CH,
+    )
+    real = torch.cat(
+        [
+            real[real_idx],
+            in_view[real_unbatched_idx],
+            background_pixels(real[real_idx, :RGB]),
+        ],
+        dim=CH,
+    )
+    # The channel dimension now is composed of RGB + RGB of input view* + mask of RGB
+    # *depending on `cfg RGBA where A is the occlusion mask
+    fake_c, real_c = camera_pose[fake_idx], camera_pose[real_idx]
+
+    # Discriminator
+    y, y_mask = d_net(
+        img=torch.cat([fake.detach(), real]), c=torch.cat([fake_c, real_c])
+    )
+    y_hat = torch.cat([label_fake(sub_n), label_real(sub_n)]).to(fake.device)
+    d_loss = criterion(y[:, 0], y_hat)
+    d_loss_mask = criterion(y_mask[:, 0], y_hat)
+    # Generator, note that labels are swapped
+    g_y, g_y_mask = d_net(img=fake, c=fake_c)
+    g_y_hat = label_real(sub_n).to(fake.device)
+    g_loss = criterion(g_y[:, 0], g_y_hat)
+    g_loss_mask = criterion(g_y_mask[:, 0], g_y_hat)
+
+    with torch.no_grad():
+        loss_dict = {
+            "d_loss_rgb_fake": d_loss[:sub_n].mean().item(),
+            "d_loss_rgb_real": d_loss[sub_n:].mean().item(),
+            "d_loss_mask_fake": d_loss_mask[:sub_n].mean().item(),
+            "d_loss_mask_real": d_loss_mask[sub_n:].mean().item(),
+            "d_acc_rgb": binary_accuracy(y[:, 0], y_hat),
+            "d_acc_mask": binary_accuracy(y_mask[:, 0], y_hat),
+        }
+    return {
+        **loss_dict,
+        "d_loss_rgb": d_loss.mean(),
+        "d_loss_mask": d_loss_mask.mean(),
+        "g_loss_rgb": g_loss.mean(),
+        "g_loss_mask": g_loss_mask.mean(),
+    }
 
 
 @hydra.main(version_base=None, config_path="configs", config_name="default_config")
@@ -89,6 +174,30 @@ def main(cfg: DictConfig):
             }
         )
     optimizer = torch.optim.Adam(l, lr=0.0, eps=1e-15, betas=cfg.opt.betas)
+
+    if cfg.gan.enabled == True:
+        assert cfg.opt.lambda_g_gan > 0.0
+        # Input the occluded input view as additional channels to
+        discriminator = GET3DDiscriminator(
+            c_dim=0,
+            img_resolution=cfg.data.training_resolution,
+            img_channels=3 * 2 + 1,
+            add_camera_cond=True,
+            data_camera_mode="shapenet_chair",
+        ).to(
+            "cuda"
+        )  # Discriminator("tmp").to("cuda")
+        d_optimizer = torch.optim.Adam(
+            [
+                {
+                    "params": discriminator.parameters(),
+                    "lr": cfg.opt.gan.base_lr,
+                }
+            ],
+            lr=0.0,
+            eps=1e-15,
+            betas=cfg.opt.betas,
+        )
 
     # Resuming training
     if fabric.is_global_zero:
@@ -155,6 +264,8 @@ def main(cfg: DictConfig):
         lpips_fn = fabric.to_device(lpips_lib.LPIPS(net="vgg"))
     lambda_lpips = cfg.opt.lambda_lpips
     lambda_l12 = 1.0 - lambda_lpips
+    lambda_g_gan = cfg.opt.lambda_g_gan
+    bce = nn.BCEWithLogitsLoss(reduction="none")
 
     bg_color = [1, 1, 1] if cfg.data.white_background else [0, 0, 0]
     background = torch.tensor(bg_color, dtype=torch.float32)
@@ -168,6 +279,7 @@ def main(cfg: DictConfig):
         persistent_workers = False
 
     dataset = MaskedDataset(cfg, get_dataset(cfg, "train"))
+    dataset.reshuffle(seed=cfg.general.random_seed)
     dataloader = DataLoader(
         dataset,
         batch_size=cfg.opt.batch_size,
@@ -192,13 +304,31 @@ def main(cfg: DictConfig):
     )
 
     test_dataset = MaskedDataset(
-        cfg, get_dataset(cfg, "vis"), return_superimposed_input=True
+        cfg, get_dataset(cfg, "vis"), return_superimposed_input=True, shuffle=False
     )
-    test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=True)
+    test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
     # distribute model and training dataset
     gaussian_predictor, optimizer = fabric.setup(gaussian_predictor, optimizer)
     dataloader = fabric.setup_dataloaders(dataloader)
+
+    if cfg.general.save_pretrain_ckpt_exit == True:
+        ckpt_save_dict = {
+            "iteration": 0,
+            "optimizer_state_dict": optimizer.state_dict(),
+            "d_optimizer_state_dict": (
+                d_optimizer.state_dict() if cfg.gan.enabled else None
+            ),
+            "loss": float("inf"),
+            "best_PSNR": 0.0,
+        }
+        if cfg.opt.ema.use:
+            ckpt_save_dict["model_state_dict"] = ema.ema_model.state_dict()
+        else:
+            ckpt_save_dict["model_state_dict"] = gaussian_predictor.state_dict()
+        torch.save(ckpt_save_dict, os.path.join(vis_dir, "pretraining_checkpoint.pth"))
+        print("Saved to pretraining_checkpoint.pth")
+        quit()
 
     gaussian_predictor.train()
     print(f"Training dataset size = {len(dataloader)}")
@@ -211,13 +341,20 @@ def main(cfg: DictConfig):
         (cfg.opt.iterations + 1 - first_iter) // len(dataloader) + 1
     ):
         dataloader.sampler.set_epoch(num_epoch)
+        print(f"Starting epoch {num_epoch}")
 
+        time_start = time.time()
+        last_epoch_iteration = iteration
+        dataloader.dataset.reshuffle(seed=cfg.general.random_seed + num_epoch)
         for data, overlay_data, input_data in dataloader:
             iteration += 1
 
             print(
-                "starting iteration {} -> {} on process {}".format(
-                    iteration, iteration / cfg.opt.iterations, fabric.global_rank
+                "starting iteration {} on process {}; {} iter/sec".format(
+                    iteration,
+                    fabric.global_rank,
+                    (time.time() - time_start)
+                    / (iteration - last_epoch_iteration + 1.19209e-07),
                 )
             )
 
@@ -229,15 +366,7 @@ def main(cfg: DictConfig):
                     assert False
                 else:
                     focals_pixels_pred = None
-                    input_images = input_data  # torch.cat(
-                    #    [
-                    #        transforms.ColorJitter(brightness=0.0, hue=0.0)(
-                    #            input_data[:, :, :3]
-                    #        ),
-                    #        input_data[:, :, 3:4],
-                    #    ],
-                    #    dim=2,
-                    # )
+                    input_images = input_data
                     input_images = adjust_channels(cfg, input_images)
 
             gaussian_splats = gaussian_predictor(
@@ -255,6 +384,9 @@ def main(cfg: DictConfig):
             rendered_images = []
             gt_images = []
             loss_weight = []
+            camera_pose = []
+            b_idxes = []
+
             for b_idx in range(data["gt_images"].shape[0]):
                 # image at index 0 is training, remaining images are targets
                 # Rendering is done sequentially because gaussian rasterization code
@@ -263,7 +395,7 @@ def main(cfg: DictConfig):
                     k: v[b_idx].contiguous() for k, v in gaussian_splats.items()
                 }
                 for r_idx in range(
-                    0 if cfg.opt.compute_loss_on_condition else cfg.data.input_images,
+                    0 if cfg.opt.compute_loss_on_input_views else cfg.data.input_images,
                     data["gt_images"].shape[1],
                 ):
                     if "focals_pixels" in data.keys():
@@ -302,23 +434,62 @@ def main(cfg: DictConfig):
                             )
                             n_weights += 1
                         if n_weights > 0:
+                            offset = (
+                                cfg.opt.weight_loss.offset_input_views
+                                if r_idx < cfg.data.input_images
+                                else cfg.opt.weight_loss.offset
+                            )
                             lw = (
-                                cfg.opt.weight_loss.offset
-                                + lw / n_weights * cfg.opt.weight_loss.global_coef
+                                offset
+                                + lw
+                                / max(1, n_weights)
+                                * cfg.opt.weight_loss.global_coef
                             )
                         else:
                             lw = torch.ones_like(lw)
                         loss_weight.append(lw)
                     # Put in a list for a later loss computation
                     rendered_images.append(image)
-                    gt_image = data["gt_images"][b_idx, r_idx, :3]
-                    gt_images.append(gt_image)
-                    input_image = input_images[b_idx, 0, ...]
+                    gt_images.append(data["gt_images"][b_idx, r_idx, :3])
+                    from utils.rotation_conversions import matrix_to_euler_angles
+
+                    camera_pose.append(
+                        matrix_to_euler_angles(
+                            data["view_to_world_transforms"][b_idx, r_idx][:3, :3],
+                            "XYZ",
+                        )
+                    )
+                    b_idxes.append(b_idx)
             rendered_images = torch.stack(rendered_images, dim=0)
             gt_images = torch.stack(gt_images, dim=0)
+            camera_pose = torch.stack(camera_pose, dim=0)
+            b_idxes = torch.LongTensor(b_idxes)
             loss_weight = (
                 torch.stack(loss_weight, dim=0) if cfg.opt.weight_loss.enabled else None
             )
+
+            if cfg.gan.enabled == True:
+                gan_loss = compute_gan_loss(
+                    cfg,
+                    discriminator,
+                    criterion=bce,
+                    fake=rendered_images,
+                    real=gt_images,
+                    in_view=input_images[:, 0, ...],
+                    camera_pose=camera_pose,
+                    b_idxes=b_idxes,
+                )
+                d_gan_loss = (gan_loss["d_loss_rgb"] + gan_loss["d_loss_mask"]) / 2.0
+                g_gan_loss = (gan_loss["g_loss_rgb"] + gan_loss["g_loss_mask"]) / 2.0
+                gan_loss = {
+                    "d_gan_loss": d_gan_loss,
+                    "g_gan_loss": g_gan_loss,
+                    **gan_loss,
+                }
+            else:
+                g_gan_loss = 0.0
+                gan_loss = {}
+
             # Loss computation
             l12_loss_sum = loss_fn(rendered_images, gt_images, loss_weight)
             if cfg.opt.lambda_lpips != 0:
@@ -326,7 +497,15 @@ def main(cfg: DictConfig):
                     lpips_fn(rendered_images * 2 - 1, gt_images * 2 - 1),
                 )
 
-            total_loss = l12_loss_sum * lambda_l12 + lpips_loss_sum * lambda_lpips
+            with torch.no_grad():
+                total_loss_wo_gan = (
+                    l12_loss_sum * lambda_l12 + lpips_loss_sum * lambda_lpips
+                )
+            total_loss = (
+                l12_loss_sum * lambda_l12
+                + lpips_loss_sum * lambda_lpips
+                + g_gan_loss * lambda_g_gan
+            )
             if cfg.data.category == "hydrants" or cfg.data.category == "teddybears":
                 assert False
 
@@ -336,9 +515,14 @@ def main(cfg: DictConfig):
                     iteration, iteration / cfg.opt.iterations, fabric.global_rank
                 )
             )
-            fabric.backward(total_loss)
 
             # ============ Optimization ===============
+            if cfg.gan.enabled == True:
+                d_gan_loss.backward()
+                d_optimizer.step()
+                d_optimizer.zero_grad()
+            fabric.backward(total_loss)
+
             optimizer.step()
             optimizer.zero_grad()
             print(
@@ -362,7 +546,13 @@ def main(cfg: DictConfig):
             with torch.no_grad():
                 if iteration % cfg.logging.loss_log == 0 and fabric.is_global_zero:
                     wandb.log(
-                        {"training_loss": np.log10(total_loss.item() + 1e-8)},
+                        {
+                            "training_loss": np.log10(total_loss.item() + 1e-8),
+                            "training_loss_wo_gan": np.log10(
+                                total_loss_wo_gan.item() + 1e-8
+                            ),
+                            **gan_loss,
+                        },
                         step=iteration,
                     )
                     if cfg.opt.lambda_lpips != 0:
@@ -402,10 +592,17 @@ def main(cfg: DictConfig):
                 if (
                     iteration % cfg.logging.render_log == 0 or iteration == 1
                 ) and fabric.is_global_zero:
+                    b_idx = 0
+                    r_idx = (
+                        0
+                        if cfg.opt.compute_loss_on_input_views
+                        else cfg.data.input_images
+                    )
                     wandb.log(
                         {
                             "render": wandb.Image(
-                                image.clamp(0.0, 1.0)
+                                rendered_images[b_idx * 4 + r_idx, :3, ...]
+                                .clamp(0.0, 1.0)
                                 .permute(1, 2, 0)
                                 .detach()
                                 .cpu()
@@ -417,7 +614,7 @@ def main(cfg: DictConfig):
                     wandb.log(
                         {
                             "occluded_input": wandb.Image(
-                                input_image[:3, ...]
+                                input_images[b_idx, 0, :3, ...]
                                 .permute(1, 2, 0)
                                 .detach()
                                 .cpu()
@@ -429,7 +626,7 @@ def main(cfg: DictConfig):
                     wandb.log(
                         {
                             "mask": wandb.Image(
-                                input_image[3:4, ...]
+                                input_images[b_idx, 0, 3:4, ...]
                                 .permute(1, 2, 0)
                                 .detach()
                                 .cpu()
@@ -441,7 +638,11 @@ def main(cfg: DictConfig):
                     wandb.log(
                         {
                             "gt": wandb.Image(
-                                gt_image.permute(1, 2, 0).detach().cpu().numpy()
+                                data["gt_images"][b_idx, r_idx, :3]
+                                .permute(1, 2, 0)
+                                .detach()
+                                .cpu()
+                                .numpy()
                             )
                         },
                         step=iteration,
@@ -593,6 +794,9 @@ def main(cfg: DictConfig):
                 ckpt_save_dict = {
                     "iteration": iteration,
                     "optimizer_state_dict": optimizer.state_dict(),
+                    "d_optimizer_state_dict": (
+                        d_optimizer.state_dict() if cfg.gan.enabled else None
+                    ),
                     "loss": total_loss.item(),
                     "best_PSNR": best_PSNR,
                 }
@@ -600,6 +804,9 @@ def main(cfg: DictConfig):
                     ckpt_save_dict["model_state_dict"] = ema.ema_model.state_dict()
                 else:
                     ckpt_save_dict["model_state_dict"] = gaussian_predictor.state_dict()
+                ckpt_save_dict["d_model_state_dict"] = (
+                    discriminator.state_dict() if cfg.gan.enabled else None
+                )
                 torch.save(ckpt_save_dict, os.path.join(vis_dir, fname_to_save))
 
             gaussian_predictor.train()

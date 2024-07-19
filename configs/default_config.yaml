@@ -9,12 +9,14 @@ general:
   random_seed: 0
   num_devices: 1
   mixed_precision: false
+  save_pretrain_ckpt_exit: false
 data:
   training_resolution: 128
   subset: -1
   input_images: 1
   origin_distances: false
   erase_occlusion: false
+  empty_overlay: False
 opt:
   iterations: 800001
   base_lr: 0.00005
@@ -30,6 +32,7 @@ opt:
     update_after_step: 100
     beta: 0.9999
   lambda_lpips: 0.0
+  lambda_g_gan: 0.5
   pretrained_ckpt: null
   mask_p: 0.0
   freeze_decoder: false
@@ -39,7 +42,9 @@ opt:
     global_coef: 0.05
     occluded_area: 1.0
     outline: 1.0
-  compute_loss_on_condition: false
+  compute_loss_on_input_views: false
+  gan:
+    base_lr: 0.001
 
 model:
   max_sh_degree: 1
@@ -63,10 +68,23 @@ model:
   base_dim: 128
   isotropic: false
   input_channels: 4
-
+  extend_bottleneck:
+    enabled: false
+    feats:
+      repo: "facebookresearch/dinov2"
+      model: "dinov2_vitb14"
+      multiplier: 14
+      apply_occlusion_mask: true
+    concat_mode: 4
+    cinterm_unet_multiplier: 1
+gan:
+  enabled: false
+  discriminator_occl_mask: true
+  sample_p: 0.5
+  
 logging:
   ckpt_iterations: 1000
   val_log: 5000
   loss_log: 10
   loop_log: 5000
-  render_log: 1000
+  render_log: 500

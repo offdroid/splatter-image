@@ -142,10 +142,13 @@ def evaluate_dataset(
                 background,
                 model_cfg,
                 focals_pixels=focals_pixels_render,
+                #override_resolution=256 if save_vis != 0 else None,
+                override_resolution=None,
             )["render"]
 
             if d_idx < save_vis:
                 # vis_image_preds(reconstruction, out_example)
+                print("Saving to", out_example_gt, "and", out_example)
                 if r_idx == 0:
                     torchvision.utils.save_image(
                         input_images[0, 0, :3, ...],
@@ -158,9 +161,12 @@ def evaluate_dataset(
                     data["gt_images"][0, r_idx, :3, ...],
                     os.path.join(out_example_gt, "{0:05d}".format(r_idx) + ".png"),
                 )
+            elif save_vis > 0:
+                print("Exited early since requested number images were saved")
+                quit()
 
             # exclude non-foreground images from metric computation
-            if not torch.all(data["gt_images"][0, r_idx, :3, ...] == 0):
+            if not torch.all(data["gt_images"][0, r_idx, :3, ...] == 0) and save_vis == 0:
                 psnr, ssim, lpips = metricator.compute_metrics(
                     image, data["gt_images"][0, r_idx, :3, ...]
                 )
@@ -173,38 +179,39 @@ def evaluate_dataset(
                     ssim_all_renders_novel.append(ssim)
                     lpips_all_renders_novel.append(lpips)
 
-        psnr_all_examples_cond.append(
-            sum(psnr_all_renders_cond) / len(psnr_all_renders_cond)
-        )
-        ssim_all_examples_cond.append(
-            sum(ssim_all_renders_cond) / len(ssim_all_renders_cond)
-        )
-        lpips_all_examples_cond.append(
-            sum(lpips_all_renders_cond) / len(lpips_all_renders_cond)
-        )
-
-        psnr_all_examples_novel.append(
-            sum(psnr_all_renders_novel) / len(psnr_all_renders_novel)
-        )
-        ssim_all_examples_novel.append(
-            sum(ssim_all_renders_novel) / len(ssim_all_renders_novel)
-        )
-        lpips_all_examples_novel.append(
-            sum(lpips_all_renders_novel) / len(lpips_all_renders_novel)
-        )
-
-        with open("scores.txt", "a+") as f:
-            f.write(
-                "{}_".format(d_idx)
-                + example_id
-                + " "
-                + str(psnr_all_examples_novel[-1])
-                + " "
-                + str(ssim_all_examples_novel[-1])
-                + " "
-                + str(lpips_all_examples_novel[-1])
-                + "\n"
+        if save_vis == 0:
+            psnr_all_examples_cond.append(
+                sum(psnr_all_renders_cond) / len(psnr_all_renders_cond)
             )
+            ssim_all_examples_cond.append(
+                sum(ssim_all_renders_cond) / len(ssim_all_renders_cond)
+            )
+            lpips_all_examples_cond.append(
+                sum(lpips_all_renders_cond) / len(lpips_all_renders_cond)
+            )
+
+            psnr_all_examples_novel.append(
+                sum(psnr_all_renders_novel) / len(psnr_all_renders_novel)
+            )
+            ssim_all_examples_novel.append(
+                sum(ssim_all_renders_novel) / len(ssim_all_renders_novel)
+            )
+            lpips_all_examples_novel.append(
+                sum(lpips_all_renders_novel) / len(lpips_all_renders_novel)
+            )
+
+            with open("scores.txt", "a+") as f:
+                f.write(
+                    "{}_".format(d_idx)
+                    + example_id
+                    + " "
+                    + str(psnr_all_examples_novel[-1])
+                    + " "
+                    + str(ssim_all_examples_novel[-1])
+                    + " "
+                    + str(lpips_all_examples_novel[-1])
+                    + "\n"
+                )
 
     scores = {
         "PSNR_cond": sum(psnr_all_examples_cond) / len(psnr_all_examples_cond),
@@ -350,6 +357,7 @@ def main(
         )
 
     else:
+        print("Experiment path =", args.experiment_path)
         cfg_path = os.path.join(experiment_path, ".hydra", "config.yaml")
         model_path = os.path.join(experiment_path, "model_latest.pth")
 
@@ -376,9 +384,18 @@ def main(
     if training_cfg.data.category == "objaverse" and split in ["test", "vis"]:
         training_cfg.data.category = "gso"
     # instantiate dataset loader
+    if save_vis:
+        torch.manual_seed(0)
+    if "baseline_wo" in out_folder:
+        print("DISALBING OVERLAY DUE TO FOLDER NAME")
     dataset = MaskedDataset(
-        training_cfg, get_dataset(training_cfg, split), return_superimposed_input=True
+        training_cfg,
+        get_dataset(training_cfg, split),
+        return_superimposed_input=True,
+        shuffle=False,
+        empty_overlay="baseline_wo" in out_folder,
     )
+    dataset.reshuffle(seed=32)
     dataloader = DataLoader(
         dataset,
         batch_size=1,
@@ -386,7 +403,6 @@ def main(
         persistent_workers=True,
         pin_memory=True,
         num_workers=1,
-        sampler=RandomSampler(dataset),
     )
 
     scores = evaluate_dataset(
@@ -481,4 +497,6 @@ if __name__ == "__main__":
         else:
             score_out_path = "{}_{}_scores.json".format(dataset_name, split)
         with open(score_out_path, "w+") as f:
+            json.dump(scores, f, indent=4)
+        with open(os.path.join(out_folder, "{}_scores.json".format(split)), "w+") as f:
             json.dump(scores, f, indent=4)
