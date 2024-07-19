@@ -384,15 +384,18 @@ def main(
     if training_cfg.data.category == "objaverse" and split in ["test", "vis"]:
         training_cfg.data.category = "gso"
     # instantiate dataset loader
+    if save_vis:
+        torch.manual_seed(0)
+    if "baseline_wo" in out_folder:
+        print("DISALBING OVERLAY DUE TO FOLDER NAME")
     dataset = MaskedDataset(
         training_cfg,
         get_dataset(training_cfg, split),
         return_superimposed_input=True,
         shuffle=False,
-        # TODO: Remove me!
-        empty_overlay="baseline_wo" in args.experiment_path,
+        empty_overlay="baseline_wo" in out_folder,
     )
-    dataset.reshuffle()
+    dataset.reshuffle(seed=32)
     dataloader = DataLoader(
         dataset,
         batch_size=1,
@@ -400,7 +403,6 @@ def main(
         persistent_workers=True,
         pin_memory=True,
         num_workers=1,
-        sampler=RandomSampler(dataset),
     )
 
     scores = evaluate_dataset(

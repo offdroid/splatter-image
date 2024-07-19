@@ -134,7 +134,7 @@ class NMRDataset(SharedDataset):
 
         # validation dataset is used for scoring - fix cond frame for reproducibility
         # in trainng need to randomly sample the conditioning frame
-        if self.dataset_name == "val":
+        if self.dataset_name == "val" or self.dataset_name == "vis":
             indexes = torch.arange(num_views)
         elif self.dataset_name == "test":
             cat_id, obj_id, _ = cam_path.split("/")[-3:]
