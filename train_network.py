@@ -89,28 +89,28 @@ def compute_gan_loss(
     )
     y_hat = torch.cat([label_fake(sub_n), label_real(sub_n)]).to(fake.device)
     d_loss = criterion(y[:, 0], y_hat)
-    d_loss_mask = criterion(y_mask[:, 0], y_hat)
+    #d_loss_mask = criterion(y_mask[:, 0], y_hat)
     # Generator, note that labels are swapped
     g_y, g_y_mask = d_net(img=fake, c=fake_c)
     g_y_hat = label_real(sub_n).to(fake.device)
     g_loss = criterion(g_y[:, 0], g_y_hat)
-    g_loss_mask = criterion(g_y_mask[:, 0], g_y_hat)
+    #g_loss_mask = criterion(g_y_mask[:, 0], g_y_hat)
 
     with torch.no_grad():
         loss_dict = {
             "d_loss_rgb_fake": d_loss[:sub_n].mean().item(),
             "d_loss_rgb_real": d_loss[sub_n:].mean().item(),
-            "d_loss_mask_fake": d_loss_mask[:sub_n].mean().item(),
-            "d_loss_mask_real": d_loss_mask[sub_n:].mean().item(),
+            #"d_loss_mask_fake": d_loss_mask[:sub_n].mean().item(),
+            #"d_loss_mask_real": d_loss_mask[sub_n:].mean().item(),
             "d_acc_rgb": binary_accuracy(y[:, 0], y_hat),
-            "d_acc_mask": binary_accuracy(y_mask[:, 0], y_hat),
+            #"d_acc_mask": binary_accuracy(y_mask[:, 0], y_hat),
         }
     return {
         **loss_dict,
         "d_loss_rgb": d_loss.mean(),
-        "d_loss_mask": d_loss_mask.mean(),
+        #"d_loss_mask": d_loss_mask.mean(),
         "g_loss_rgb": g_loss.mean(),
-        "g_loss_mask": g_loss_mask.mean(),
+        #"g_loss_mask": g_loss_mask.mean(),
     }
 
 
@@ -479,8 +479,8 @@ def main(cfg: DictConfig):
                     camera_pose=camera_pose,
                     b_idxes=b_idxes,
                 )
-                d_gan_loss = (gan_loss["d_loss_rgb"] + gan_loss["d_loss_mask"]) / 2.0
-                g_gan_loss = (gan_loss["g_loss_rgb"] + gan_loss["g_loss_mask"]) / 2.0
+                d_gan_loss = gan_loss["d_loss_rgb"]
+                g_gan_loss = gan_loss["g_loss_rgb"]
                 gan_loss = {
                     "d_gan_loss": d_gan_loss,
                     "g_gan_loss": g_gan_loss,

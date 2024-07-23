@@ -756,54 +756,54 @@ class Discriminator(torch.nn.Module):
         )
 
         # Step 2: set up discriminator for mask image
-        common_kwargs = dict(
-            img_channels=self.img_channels_dmask,
-            architecture=architecture,
-            conv_clamp=conv_clamp,
-        )
-        cur_layer_idx = 0
-        mask_channel_base = channel_base
-        mask_channel_max = channel_max
-        mask_channels_dict = {
-            res: min(mask_channel_base // res, mask_channel_max)
-            for res in self.block_resolutions + [4]
-        }
-        for res in self.block_resolutions:
-            in_channels = mask_channels_dict[res] if res < img_resolution else 0
-            tmp_channels = mask_channels_dict[res]
-            out_channels = mask_channels_dict[res // 2]
-            use_fp16 = res >= fp16_resolution
-            block = DiscriminatorBlock(
-                in_channels,
-                tmp_channels,
-                out_channels,
-                resolution=res,
-                first_layer_idx=cur_layer_idx,
-                use_fp16=use_fp16,
-                device=device,
-                **block_kwargs,
-                **common_kwargs,
-            )
-            setattr(self, f"mask_b{res}", block)
-            cur_layer_idx += block.num_layers
-        if self.c_dim > 0:
-            self.mask_mapping = MappingNetwork(
-                z_dim=0,
-                c_dim=self.c_dim,
-                w_dim=cmap_dim,
-                num_ws=None,
-                w_avg_beta=None,
-                device=device,
-                **mapping_kwargs,
-            )
-        self.mask_b4 = DiscriminatorEpilogue(
-            mask_channels_dict[4],
-            cmap_dim=cmap_dim,
-            resolution=4,
-            device=device,
-            **epilogue_kwargs,
-            **common_kwargs,
-        )
+        # common_kwargs = dict(
+        #     img_channels=self.img_channels_dmask,
+        #     architecture=architecture,
+        #     conv_clamp=conv_clamp,
+        # )
+        # cur_layer_idx = 0
+        # mask_channel_base = channel_base
+        # mask_channel_max = channel_max
+        # mask_channels_dict = {
+        #     res: min(mask_channel_base // res, mask_channel_max)
+        #     for res in self.block_resolutions + [4]
+        # }
+        # for res in self.block_resolutions:
+        #     in_channels = mask_channels_dict[res] if res < img_resolution else 0
+        #     tmp_channels = mask_channels_dict[res]
+        #     out_channels = mask_channels_dict[res // 2]
+        #     use_fp16 = res >= fp16_resolution
+        #     block = DiscriminatorBlock(
+        #         in_channels,
+        #         tmp_channels,
+        #         out_channels,
+        #         resolution=res,
+        #         first_layer_idx=cur_layer_idx,
+        #         use_fp16=use_fp16,
+        #         device=device,
+        #         **block_kwargs,
+        #         **common_kwargs,
+        #     )
+        #     setattr(self, f"mask_b{res}", block)
+        #     cur_layer_idx += block.num_layers
+        # if self.c_dim > 0:
+        #     self.mask_mapping = MappingNetwork(
+        #         z_dim=0,
+        #         c_dim=self.c_dim,
+        #         w_dim=cmap_dim,
+        #         num_ws=None,
+        #         w_avg_beta=None,
+        #         device=device,
+        #         **mapping_kwargs,
+        #     )
+        # self.mask_b4 = DiscriminatorEpilogue(
+        #     mask_channels_dict[4],
+        #     cmap_dim=cmap_dim,
+        #     resolution=4,
+        #     device=device,
+        #     **epilogue_kwargs,
+        #     **common_kwargs,
+        # )
 
     def pos_enc_angle(self, camera_angle):
         # Encode the camera angles into cos/sin
@@ -849,21 +849,21 @@ class Discriminator(torch.nn.Module):
             c = None
 
         # Step 1: feed the mask image into the discriminator
-        _ = update_emas
-        mask_x = None
-        img_res = img.shape[-1]
-        mask_img = img[
-            :, self.img_channels_drgb : self.img_channels_drgb + self.img_channels_dmask
-        ]  # This is only supervising the geometry
-        for res in self.block_resolutions:
-            block = getattr(self, f"mask_b{res}")
-            mask_x, mask_img = block(
-                mask_x, mask_img, alpha, (img_res // 2) == res, **block_kwargs
-            )
-        mask_cmap = None
-        if self.c_dim > 0:
-            mask_cmap = self.mask_mapping(None, c)
-        mask_x = self.mask_b4(mask_x, mask_img, mask_cmap)
+        # _ = update_emas
+        # mask_x = None
+        # img_res = img.shape[-1]
+        # mask_img = img[
+        #     :, self.img_channels_drgb : self.img_channels_drgb + self.img_channels_dmask
+        # ]  # This is only supervising the geometry
+        # for res in self.block_resolutions:
+        #     block = getattr(self, f"mask_b{res}")
+        #     mask_x, mask_img = block(
+        #         mask_x, mask_img, alpha, (img_res // 2) == res, **block_kwargs
+        #     )
+        # mask_cmap = None
+        # if self.c_dim > 0:
+        #     mask_cmap = self.mask_mapping(None, c)
+        # mask_x = self.mask_b4(mask_x, mask_img, mask_cmap)
 
         # Step 2: feed the RGB image into another discriminator
         img_for_tex = img[:, : self.img_channels_drgb, :, :]
@@ -879,7 +879,7 @@ class Discriminator(torch.nn.Module):
         if self.c_dim > 0:
             cmap = self.mapping(None, c)
         x = self.b4(x, img_for_tex, cmap)
-        return x, mask_x
+        return x, None #, mask_x
 
     def extra_repr(self):
         return f"c_dim={self.c_dim:d}, img_resolution={self.img_resolution:d}, img_channels={self.img_channels_drgb:d}"
