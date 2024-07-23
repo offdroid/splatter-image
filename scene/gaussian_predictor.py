@@ -814,19 +814,16 @@ class SingleImageSongUNetPredictor(nn.Module):
     def forward(self, x, film_camera_emb=None, N_views_xa=1):
         if self.feat_model is not None:
             with torch.no_grad():
-                scaled = CenterPadding(
-                    self.cfg.model.extend_bottleneck.feats.multiplier
-                )(
-                    x[:, :3, ...]
-                    * (
-                        x[:, 3:4, ...]
-                        if self.cfg.model.extend_bottleneck.feats.apply_occlusion_mask
-                        else 1.0
-                    )
-                )
+                if self.cfg.model.extend_bottleneck.feats.apply_occlusion_mask:
+                    raise ValueError("Unsupported option apply_occlusion_mask")
+                scaled = nn.Upsample(
+                    size=(224,) * 2,
+                    mode="bilinear",
+                    align_corners=True,
+                )(x[:, :3, ...])
                 (feats,) = self.feat_model.get_intermediate_layers(scaled)
                 assert feats.shape[-1] == 768
-                feats = feats.reshape(-1, 5, 5, 768)
+                feats = feats.reshape(-1, 16, 16, 768)
         else:
             feats = None
         x = self.encoder(
@@ -1113,7 +1110,6 @@ class GaussianSplatPredictor(nn.Module):
         focals_pixels=None,
         activate_output=True,
     ):
-
         B = x.shape[0]
         N_views = x.shape[1]
         # UNet attention will reshape outputs so that there is cross-view attention

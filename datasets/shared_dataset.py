@@ -4,7 +4,7 @@ import numpy as np
 import torch
 from torch.utils.data import Dataset
 
-from utils.general_utils import matrix_to_quaternion, superimpose_overlay
+from utils.general_utils import matrix_to_quaternion, compose_input_view
 
 
 class SharedDataset(Dataset):
@@ -50,25 +50,25 @@ class SharedDataset(Dataset):
         return torch.stack(qs, dim=0)
 
 
-class MaskedDataset(SharedDataset):
+class WholePartialDataset(SharedDataset):
     def __init__(
         self,
         cfg,
         dataset,
-        return_superimposed_input=False,
+        return_input_view=False,
         shuffle=True,
         empty_overlay=False,
     ) -> None:
         super().__init__()
         self.cfg = cfg
-        self._ret_input_data = return_superimposed_input
-        self._empty_overlay = empty_overlay
+        self.return_composed_input_view: bool = return_input_view
+        self.no_overlay: bool = empty_overlay
 
         self.data = dataset
         self._shuffle = shuffle
-        self.reshuffle()
+        self.shuffle()
 
-    def reshuffle(self, seed=None):
+    def shuffle(self, seed=None):
         if self._shuffle:
             if seed is not None:
                 rng = np.random.default_rng(seed=seed)
@@ -91,21 +91,40 @@ class MaskedDataset(SharedDataset):
 
     def __getitem__(self, index):
         object_data = self.data[self.map[index]]
-        overlay_data = self.data[self.overlay_map[index]]
-        if self._empty_overlay:
-            overlay_data["gt_images"] = torch.zeros_like(overlay_data["gt_images"])
+        if not self.no_overlay:
+            occlusion_data = self.data[self.overlay_map[index]]["gt_images"]
 
-        if self._ret_input_data:
-            if len(object_data["gt_images"].shape) == 4:
-                input_data = superimpose_overlay(
+        if self.return_composed_input_view and not self.no_overlay:
+            if len(object_data["gt_images"].shape) == 5:
+                input_view_data = compose_input_view(
+                    object_data["gt_images"][:, : self.cfg.data.input_images, ...],
+                    occlusion_data[:, : self.cfg.data.input_images, ...],
+                )
+            elif len(object_data["gt_images"].shape) == 4:
+                input_view_data = compose_input_view(
                     object_data["gt_images"][None, : self.cfg.data.input_images, ...],
-                    overlay_data["gt_images"][None, : self.cfg.data.input_images, ...],
+                    occlusion_data[None, : self.cfg.data.input_images, ...],
                 )[0, ...]
             else:
-                input_data = superimpose_overlay(
+                raise RuntimeError("Expected data dimension to be 4 or 5")
+            return object_data, occlusion_data, input_view_data
+        elif self.return_composed_input_view and self.no_overlay:
+            if len(object_data["gt_images"].shape) == 5:
+                return (
+                    object_data,
+                    torch.zeros_like(object_data["gt_images"]),
                     object_data["gt_images"][:, : self.cfg.data.input_images, ...],
-                    overlay_data["gt_images"][:, : self.cfg.data.input_images, ...],
                 )
-            return object_data, overlay_data, input_data
-        else:
-            return object_data, overlay_data
+            elif len(object_data["gt_images"].shape) == 4:
+                return (
+                    object_data,
+                    torch.zeros_like(object_data["gt_images"]),
+                    object_data["gt_images"][: self.cfg.data.input_images, ...],
+                )
+            else:
+                raise RuntimeError("Expected data dimension to be 4 or 5")
+
+        elif not self.return_composed_input_view and not self.no_overlay:
+            return object_data, occlusion_data
+        elif not self.return_composed_input_view and self.no_overlay:
+            return object_data, torch.zeros_like(object_data["gt_images"])

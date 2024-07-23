@@ -16,7 +16,7 @@ data:
   input_images: 1
   origin_distances: false
   erase_occlusion: false
-  empty_overlay: False
+  empty_overlay: false
 opt:
   iterations: 800001
   base_lr: 0.00005

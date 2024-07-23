@@ -18,7 +18,7 @@ from torcheval.metrics.functional import binary_accuracy
 
 import wandb
 from datasets.dataset_factory import get_dataset
-from datasets.shared_dataset import MaskedDataset
+from datasets.shared_dataset import WholePartialDataset
 from eval import evaluate_dataset
 from gan.get3d.discriminator import Discriminator as GET3DDiscriminator
 from gaussian_renderer import render_predicted
@@ -114,9 +114,98 @@ def compute_gan_loss(
     }
 
 
+def loss_weight(cfg, r_idx, b_idx, data, occluder_data, input_view, image):
+    n_weights = 0
+    lw = torch.zeros_like(image)
+    if r_idx < cfg.data.input_images and cfg.opt.weight_loss.occluded_area > 0.0:
+        # WARN: Input image is currently always skipped
+        lw += (
+            occluded_area(
+                data["gt_images"][b_idx, r_idx, 3:4],
+                occluder_data["gt_images"][b_idx, r_idx, 3:4],
+            )
+            * cfg.opt.weight_loss.occluded_area
+        )
+        n_weights += 1
+    if cfg.opt.weight_loss.outline:
+        lw += mask_to_outline(input_view[b_idx, 0, 3:4]) * cfg.opt.weight_loss.outline
+        n_weights += 1
+    if n_weights > 0:
+        offset = (
+            cfg.opt.weight_loss.offset_input_views
+            if r_idx < cfg.data.input_images
+            else cfg.opt.weight_loss.offset
+        )
+        lw = offset + lw / max(1, n_weights) * cfg.opt.weight_loss.global_coef
+    else:
+        lw = torch.ones_like(lw)
+    return lw
+
+
+def freeze_layers(*xs):
+    for param in chain([x.parameters() for x in xs]):
+        param.requires_grad = False
+
+
+def build_datasets(cfg, num_workers, persistent_workers):
+    dataset = WholePartialDataset(
+        cfg,
+        get_dataset(cfg, "train"),
+        shuffle=True,
+        empty_overlay=cfg.data.empty_overlay,
+        return_input_view=False,
+    )
+    dataset.shuffle(seed=cfg.general.random_seed)
+    dataloader = DataLoader(
+        dataset,
+        batch_size=cfg.opt.batch_size,
+        shuffle=True,
+        num_workers=num_workers,
+        persistent_workers=persistent_workers,
+        prefetch_factor=2,
+        collate_fn=partial(
+            collate_and_superimpose,
+            cfg.data.input_images,
+            1 if cfg.data.empty_overlay else 200,
+        ),
+    )
+
+    val_dataset = WholePartialDataset(
+        cfg,
+        get_dataset(cfg, "val"),
+        shuffle=False,
+        empty_overlay=cfg.data.empty_overlay,
+        return_input_view=True,
+    )
+    val_dataset.shuffle(seed=32)
+    val_dataloader = DataLoader(
+        val_dataset,
+        batch_size=1,
+        shuffle=False,
+        num_workers=1,
+        persistent_workers=True,
+        pin_memory=True,
+        prefetch_factor=2,
+    )
+
+    test_dataset = WholePartialDataset(
+        cfg,
+        get_dataset(cfg, "vis"),
+        empty_overlay=cfg.data.empty_overlay,
+        shuffle=False,
+        return_input_view=True,
+    )
+    test_dataset.shuffle(seed=32)
+    test_dataloader = DataLoader(
+        test_dataset,
+        batch_size=1,
+        shuffle=False,
+    )
+    return dataloader, val_dataloader, test_dataloader
+
+
 @hydra.main(version_base=None, config_path="configs", config_name="default_config")
 def main(cfg: DictConfig):
-
     torch.set_float32_matmul_precision("high")
     if cfg.general.mixed_precision:
         fabric = Fabric(
@@ -151,6 +240,9 @@ def main(cfg: DictConfig):
             wandb_run = wandb.init(
                 project=cfg.wandb.project, reinit=True, config=dict_cfg
             )
+    wandb.log(
+        {"output_dir": hydra.core.hydra_config.HydraConfig.get().runtime.output_dir}
+    )
 
     first_iter = 0
     device = safe_state(cfg)
@@ -238,13 +330,12 @@ def main(cfg: DictConfig):
             best_PSNR = 0.0
 
     if cfg.opt.freeze_decoder:
-        # Freeze the decoder. The decoder seems to be split into two
+        # Freeze the decoder
         print("Freezing decoder. Only encoder will be fine-tuned")
-        for param in chain(
-            gaussian_predictor.network_with_offset.encoder.dec.parameters(),
-            gaussian_predictor.network_with_offset.out.parameters(),
-        ):
-            param.requires_grad = False
+        freeze_layers(
+            gaussian_predictor.network_with_offset.encoder.dec,
+            gaussian_predictor.network_with_offset.out,
+        )
 
     if cfg.opt.ema.use and fabric.is_global_zero:
         ema = EMA(
@@ -272,41 +363,15 @@ def main(cfg: DictConfig):
     background = fabric.to_device(background)
 
     if cfg.data.category in ["nmr", "objaverse"]:
-        num_workers = 2
+        num_workers = 4
         persistent_workers = True
     else:
         num_workers = 0
         persistent_workers = False
 
-    dataset = MaskedDataset(cfg, get_dataset(cfg, "train"))
-    dataset.reshuffle(seed=cfg.general.random_seed)
-    dataloader = DataLoader(
-        dataset,
-        batch_size=cfg.opt.batch_size,
-        shuffle=True,
-        num_workers=num_workers,
-        persistent_workers=persistent_workers,
-        prefetch_factor=2,
-        collate_fn=partial(collate_and_superimpose, cfg.data.input_images, 200),
+    dataloader, val_dataloader, test_dataloader = build_datasets(
+        cfg, num_workers, persistent_workers
     )
-
-    val_dataset = MaskedDataset(
-        cfg, get_dataset(cfg, "val"), return_superimposed_input=True
-    )
-    val_dataloader = DataLoader(
-        val_dataset,
-        batch_size=1,
-        shuffle=False,
-        num_workers=1,
-        persistent_workers=True,
-        pin_memory=True,
-        prefetch_factor=2,
-    )
-
-    test_dataset = MaskedDataset(
-        cfg, get_dataset(cfg, "vis"), return_superimposed_input=True, shuffle=False
-    )
-    test_dataloader = DataLoader(test_dataset, batch_size=1, shuffle=False)
 
     # distribute model and training dataset
     gaussian_predictor, optimizer = fabric.setup(gaussian_predictor, optimizer)
@@ -345,8 +410,8 @@ def main(cfg: DictConfig):
 
         time_start = time.time()
         last_epoch_iteration = iteration
-        dataloader.dataset.reshuffle(seed=cfg.general.random_seed + num_epoch)
-        for data, overlay_data, input_data in dataloader:
+        dataloader.dataset.shuffle(seed=cfg.general.random_seed + num_epoch)
+        for data, occluder_data, input_view in dataloader:
             iteration += 1
 
             print(
@@ -362,28 +427,22 @@ def main(cfg: DictConfig):
             rot_transform_quats = data["source_cv2wT_quat"][:, : cfg.data.input_images]
 
             with torch.no_grad():
-                if cfg.data.category == "hydrants" or cfg.data.category == "teddybears":
-                    assert False
-                else:
-                    focals_pixels_pred = None
-                    input_images = input_data
-                    input_images = adjust_channels(cfg, input_images)
+                focals_pixels_pred = None
+                input_view = adjust_channels(cfg, input_view)
 
             gaussian_splats = gaussian_predictor(
-                input_images,
+                input_view,
                 data["view_to_world_transforms"][:, : cfg.data.input_images, ...],
                 rot_transform_quats,
                 focals_pixels_pred,
             )
 
-            if cfg.data.category == "hydrants" or cfg.data.category == "teddybears":
-                assert False
             # Render
             l12_loss_sum = 0.0
             lpips_loss_sum = 0.0
             rendered_images = []
             gt_images = []
-            loss_weight = []
+            loss_weights = []
             camera_pose = []
             b_idxes = []
 
@@ -412,42 +471,17 @@ def main(cfg: DictConfig):
                         focals_pixels=focals_pixels_render,
                     )["render"]
                     if cfg.opt.weight_loss.enabled:
-                        n_weights = 0
-                        lw = torch.zeros_like(image)
-                        if (
-                            r_idx < cfg.data.input_images
-                            and cfg.opt.weight_loss.occluded_area > 0.0
-                        ):
-                            # WARN: Input image is currently always skipped
-                            lw += (
-                                occluded_area(
-                                    data["gt_images"][b_idx, r_idx, 3:4],
-                                    overlay_data["gt_images"][b_idx, r_idx, 3:4],
-                                )
-                                * cfg.opt.weight_loss.occluded_area
+                        loss_weights.append(
+                            loss_weight(
+                                cfg,
+                                r_idx,
+                                b_idx,
+                                data,
+                                occluder_data,
+                                input_view,
+                                image,
                             )
-                            n_weights += 1
-                        if cfg.opt.weight_loss.outline:
-                            lw += (
-                                mask_to_outline(input_images[b_idx, 0, 3:4])
-                                * cfg.opt.weight_loss.outline
-                            )
-                            n_weights += 1
-                        if n_weights > 0:
-                            offset = (
-                                cfg.opt.weight_loss.offset_input_views
-                                if r_idx < cfg.data.input_images
-                                else cfg.opt.weight_loss.offset
-                            )
-                            lw = (
-                                offset
-                                + lw
-                                / max(1, n_weights)
-                                * cfg.opt.weight_loss.global_coef
-                            )
-                        else:
-                            lw = torch.ones_like(lw)
-                        loss_weight.append(lw)
+                        )
                     # Put in a list for a later loss computation
                     rendered_images.append(image)
                     gt_images.append(data["gt_images"][b_idx, r_idx, :3])
@@ -464,18 +498,20 @@ def main(cfg: DictConfig):
             gt_images = torch.stack(gt_images, dim=0)
             camera_pose = torch.stack(camera_pose, dim=0)
             b_idxes = torch.LongTensor(b_idxes)
-            loss_weight = (
-                torch.stack(loss_weight, dim=0) if cfg.opt.weight_loss.enabled else None
+            loss_weights = (
+                torch.stack(loss_weights, dim=0)
+                if cfg.opt.weight_loss.enabled
+                else None
             )
 
-            if cfg.gan.enabled == True:
+            if cfg.gan.enabled:
                 gan_loss = compute_gan_loss(
                     cfg,
                     discriminator,
                     criterion=bce,
                     fake=rendered_images,
                     real=gt_images,
-                    in_view=input_images[:, 0, ...],
+                    in_view=input_view[:, 0, ...],
                     camera_pose=camera_pose,
                     b_idxes=b_idxes,
                 )
@@ -491,7 +527,7 @@ def main(cfg: DictConfig):
                 gan_loss = {}
 
             # Loss computation
-            l12_loss_sum = loss_fn(rendered_images, gt_images, loss_weight)
+            l12_loss_sum = loss_fn(rendered_images, gt_images, loss_weights)
             if cfg.opt.lambda_lpips != 0:
                 lpips_loss_sum = torch.mean(
                     lpips_fn(rendered_images * 2 - 1, gt_images * 2 - 1),
@@ -506,8 +542,6 @@ def main(cfg: DictConfig):
                 + lpips_loss_sum * lambda_lpips
                 + g_gan_loss * lambda_g_gan
             )
-            if cfg.data.category == "hydrants" or cfg.data.category == "teddybears":
-                assert False
 
             assert not total_loss.isnan(), "Found NaN loss!"
             print(
@@ -517,7 +551,7 @@ def main(cfg: DictConfig):
             )
 
             # ============ Optimization ===============
-            if cfg.gan.enabled == True:
+            if cfg.gan.enabled:
                 d_gan_loss.backward()
                 d_optimizer.step()
                 d_optimizer.zero_grad()
@@ -568,26 +602,6 @@ def main(cfg: DictConfig):
                             },
                             step=iteration,
                         )
-                    if (
-                        cfg.data.category == "hydrants"
-                        or cfg.data.category == "teddybears"
-                    ):
-                        if type(big_gaussian_reg_loss) == float:
-                            brl_for_log = big_gaussian_reg_loss
-                        else:
-                            brl_for_log = big_gaussian_reg_loss.item()
-                        if type(small_gaussian_reg_loss) == float:
-                            srl_for_log = small_gaussian_reg_loss
-                        else:
-                            srl_for_log = small_gaussian_reg_loss.item()
-                        wandb.log(
-                            {"reg_loss_big": np.log10(brl_for_log + 1e-8)},
-                            step=iteration,
-                        )
-                        wandb.log(
-                            {"reg_loss_small": np.log10(srl_for_log + 1e-8)},
-                            step=iteration,
-                        )
 
                 if (
                     iteration % cfg.logging.render_log == 0 or iteration == 1
@@ -614,7 +628,7 @@ def main(cfg: DictConfig):
                     wandb.log(
                         {
                             "occluded_input": wandb.Image(
-                                input_images[b_idx, 0, :3, ...]
+                                input_view[b_idx, 0, :3, ...]
                                 .permute(1, 2, 0)
                                 .detach()
                                 .cpu()
@@ -626,7 +640,7 @@ def main(cfg: DictConfig):
                     wandb.log(
                         {
                             "mask": wandb.Image(
-                                input_images[b_idx, 0, 3:4, ...]
+                                input_view[b_idx, 0, 3:4, ...]
                                 .permute(1, 2, 0)
                                 .detach()
                                 .cpu()
@@ -667,29 +681,12 @@ def main(cfg: DictConfig):
                         :, : cfg.data.input_images
                     ]
 
-                    if (
-                        cfg.data.category == "hydrants"
-                        or cfg.data.category == "teddybears"
-                    ):
-                        assert False
-                        focals_pixels_pred = vis_data["focals_pixels"][
-                            :, : cfg.data.input_images, ...
-                        ]
-                        input_images = torch.cat(
-                            [
-                                vis_data["gt_images"][:, : cfg.data.input_images, ...],
-                                vis_data["origin_distances"][
-                                    :, : cfg.data.input_images, ...
-                                ],
-                            ],
-                            dim=2,
-                        )
-                    else:
-                        focals_pixels_pred = None
-                        input_images = adjust_channels(cfg, vis_input_data)
+                    focals_pixels_pred = None
+                    input_view = adjust_channels(cfg, vis_input_data)
 
+                    print(input_view.shape)
                     gaussian_splats_vis = gaussian_predictor(
-                        input_images,
+                        input_view,
                         vis_data["view_to_world_transforms"][
                             :, : cfg.data.input_images, ...
                         ],

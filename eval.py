@@ -14,7 +14,7 @@ from torch.utils.data import DataLoader, RandomSampler
 from torchvision import transforms
 
 from datasets.dataset_factory import get_dataset
-from datasets.shared_dataset import MaskedDataset
+from datasets.shared_dataset import WholePartialDataset
 from gaussian_renderer import render_predicted
 from scene.gaussian_predictor import GaussianSplatPredictor
 from utils.general_utils import adjust_channels
@@ -39,7 +39,7 @@ class Metricator:
 @torch.no_grad()
 def evaluate_dataset(
     model,
-    dataloader: MaskedDataset,
+    dataloader: WholePartialDataset,
     device,
     model_cfg,
     save_vis=0,
@@ -388,14 +388,14 @@ def main(
         torch.manual_seed(0)
     if "baseline_wo" in out_folder:
         print("DISALBING OVERLAY DUE TO FOLDER NAME")
-    dataset = MaskedDataset(
+    dataset = WholePartialDataset(
         training_cfg,
         get_dataset(training_cfg, split),
-        return_superimposed_input=True,
-        shuffle=False,
+        return_input_view=True,
+        shuffle=True,
         empty_overlay="baseline_wo" in out_folder,
     )
-    dataset.reshuffle(seed=32)
+    dataset.shuffle(seed=32)
     dataloader = DataLoader(
         dataset,
         batch_size=1,

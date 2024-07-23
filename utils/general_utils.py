@@ -240,7 +240,7 @@ def safe_state(cfg, silent=False):
 
 
 @torch.no_grad
-def superimpose_overlay(
+def compose_input_view(
     view: torch.Tensor,
     overlay: torch.Tensor,
     max_tries: int = 1,
@@ -280,7 +280,6 @@ def superimpose_overlay(
         cond = torch.bitwise_and(torch.less_equal(LO, cond), torch.less_equal(cond, HI))
         if torch.all(cond):
             break
-    # print(torch.sum(mask, dim=(1, 2, 3, 4)) / torch.sum( view[:, :, 3:4, ...] > 0, dim=(1, 2, 3, 4)))
     rgb = (
         view[:, :, :3, ...] * (1 - overlay_[:, :, 3:4, ...])
         + overlay_[:, :, :3, ...] * overlay_[:, :, 3:4, ...]
@@ -289,16 +288,16 @@ def superimpose_overlay(
 
 
 def collate_and_superimpose(input_images: int, max_tries: int, *args):
-    view, overlay = default_collate(*args)
-    return (
-        view,
-        overlay,
-        superimpose_overlay(
+    view, occlusion = default_collate(*args)
+    if occlusion is None:
+        input_view = view["gt_images"][:, :input_images, ...]
+    else:
+        input_view = compose_input_view(
             view["gt_images"][:, :input_images, ...],
-            overlay["gt_images"][:, :input_images, ...],
+            occlusion[:, :input_images, ...],
             max_tries=max_tries,
-        ),
-    )
+        )
+    return view, occlusion, input_view
 
 
 def mask_to_outline(mask):
