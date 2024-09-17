@@ -632,6 +632,7 @@ class SongUNet(nn.Module):
             if cfg.model.extend_bottleneck.concat_mode == "copy":
                 dec_in_channels[0] *= 2
             else:
+                assert False
                 dec_in_channels[0] += int(cfg.model.extend_bottleneck.concat_mode) * 32
         else:
             dec_in_channels = [cout, cout]
@@ -660,8 +661,10 @@ class SongUNet(nn.Module):
                     **block_kwargs,
                 )
             else:
+                assert cfg.model.extend_bottleneck.concat_mode == "copy"
+                dec_channels = cout * 2
                 self.dec[f"{res}x{res}_up"] = UNetBlock(
-                    in_channels=cout, out_channels=cout, up=True, **block_kwargs
+                    in_channels=cout, out_channels=dec_channels, up=True, **block_kwargs
                 )
             for idx in range(num_blocks + 1):
                 cin = cout + skips.pop()
@@ -727,6 +730,7 @@ class SongUNet(nn.Module):
         aux = None
         tmp = None
         for name, block in self.dec.items():
+            print("dec:", name)
             if "aux_up" in name:
                 aux = block(aux, N_views_xa)
             elif "aux_norm" in name:
@@ -737,7 +741,7 @@ class SongUNet(nn.Module):
             elif "reduce_dim" in name:
                 pass
             else:
-                if "in0" in name and feats is not None:
+                if ("in0" in name or "up" in name) and feats is not None:
                     assert self.cfg.model.extend_bottleneck.enabled == True
                     assert len(x.shape) == 4  # B C H W
 
