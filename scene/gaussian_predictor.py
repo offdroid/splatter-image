@@ -625,43 +625,40 @@ class SongUNet(nn.Module):
         ]
 
         if hasattr(cfg.model, "extend_bottleneck") and cfg.model.extend_bottleneck.enabled == True:
-            dec_in_channels = [
-                cout,
-                cout * int(cfg.model.extend_bottleneck.cinterm_unet_multiplier),
-            ]
             if cfg.model.extend_bottleneck.concat_mode == "copy":
-                dec_in_channels[0] *= 2
+                fn_channels = lambda x: x * 2
             else:
-                dec_in_channels[0] += int(cfg.model.extend_bottleneck.concat_mode) * 32
+                fn_channels = lambda x: x + int(cfg.model.extend_bottleneck.concat_mode) * 32
         else:
-            dec_in_channels = [cout, cout]
+            fn_channels = lambda x: x
 
+        self._feats_res = []
         # Decoder.
         self.dec = torch.nn.ModuleDict()
         for level, mult in reversed(list(enumerate(channel_mult))):
             res = img_resolution >> level
             if level == len(channel_mult) - 1:
                 if hasattr(cfg.model, "extend_bottleneck") and cfg.model.extend_bottleneck.enabled == True:
-                    self.dec["reduce_dim"] = nn.Sequential(
-                        nn.Conv2d(768, dec_in_channels[0] - cout, kernel_size=1),
-                        nn.BatchNorm2d(dec_in_channels[0] - cout),
+                    self.dec[f"{res}x{res}_reduce_dim"] = nn.Sequential(
+                        nn.Conv2d(768, fn_channels(cout) - cout, kernel_size=1),
+                        nn.BatchNorm2d(fn_channels(cout) - cout),
                         nn.ReLU(inplace=True),
                     )
-                    self._feats_res = res
+                    self._feats_res.append(res)
                 self.dec[f"{res}x{res}_in0"] = UNetBlock(
-                    in_channels=dec_in_channels[0],
-                    out_channels=dec_in_channels[1],
+                    in_channels=fn_channels(cout),
+                    out_channels=cout,
                     attention=True,
                     **block_kwargs,
                 )
                 self.dec[f"{res}x{res}_in1"] = UNetBlock(
-                    in_channels=dec_in_channels[1],
+                    in_channels=cout,
                     out_channels=cout,
                     **block_kwargs,
                 )
             else:
                 self.dec[f"{res}x{res}_up"] = UNetBlock(
-                    in_channels=cout, out_channels=cout, up=True, **block_kwargs
+                    in_channels=fn_channels(cout), out_channels=cout, up=True, **block_kwargs
                 )
             for idx in range(num_blocks + 1):
                 cin = cout + skips.pop()
@@ -737,16 +734,23 @@ class SongUNet(nn.Module):
             elif "reduce_dim" in name:
                 pass
             else:
-                if "in0" in name and feats is not None:
+                if ("in0" in name and "up" in name) and feats is not None:
                     assert self.cfg.model.extend_bottleneck.enabled == True
                     assert len(x.shape) == 4  # B C H W
 
+                    res = name.find("x")
+                    if res == -1:
+                        # `in0` block present. Cannot extract resolution from name
+                        assert "in0" in name
+                        res = self._feats_res[0]
+                    else:
+                        res = int(name[:res])
+
                     feats = feats.permute(0, 3, 1, 2)
-                    feats = self.dec["reduce_dim"](feats)
-                    assert self._feats_res == 8
+                    feats = self.dec[f"{res}x{res}_reduce_dim"](feats)
                     feats = F.interpolate(
                         feats,
-                        size=(self._feats_res, self._feats_res),
+                        size=(res, res),
                         mode="bilinear",
                         align_corners=True,
                     )
