@@ -624,11 +624,16 @@ class SongUNet(nn.Module):
             block.out_channels for name, block in self.enc.items() if "aux" not in name
         ]
 
-        if hasattr(cfg.model, "extend_bottleneck") and cfg.model.extend_bottleneck.enabled == True:
+        if (
+            hasattr(cfg.model, "extend_bottleneck")
+            and cfg.model.extend_bottleneck.enabled == True
+        ):
             if cfg.model.extend_bottleneck.concat_mode == "copy":
                 fn_channels = lambda x: x * 2
             else:
-                fn_channels = lambda x: x + int(cfg.model.extend_bottleneck.concat_mode) * 32
+                fn_channels = (
+                    lambda x: x + int(cfg.model.extend_bottleneck.concat_mode) * 32
+                )
         else:
             fn_channels = lambda x: x
 
@@ -638,13 +643,6 @@ class SongUNet(nn.Module):
         for level, mult in reversed(list(enumerate(channel_mult))):
             res = img_resolution >> level
             if level == len(channel_mult) - 1:
-                if hasattr(cfg.model, "extend_bottleneck") and cfg.model.extend_bottleneck.enabled == True:
-                    self.dec[f"{res}x{res}_reduce_dim"] = nn.Sequential(
-                        nn.Conv2d(768, fn_channels(cout) - cout, kernel_size=1),
-                        nn.BatchNorm2d(fn_channels(cout) - cout),
-                        nn.ReLU(inplace=True),
-                    )
-                    self._feats_res.append(res)
                 self.dec[f"{res}x{res}_in0"] = UNetBlock(
                     in_channels=fn_channels(cout),
                     out_channels=cout,
@@ -652,14 +650,28 @@ class SongUNet(nn.Module):
                     **block_kwargs,
                 )
                 self.dec[f"{res}x{res}_in1"] = UNetBlock(
-                    in_channels=cout,
+                    in_channels=cout,  # fn_channels(cout),
                     out_channels=cout,
                     **block_kwargs,
                 )
             else:
                 self.dec[f"{res}x{res}_up"] = UNetBlock(
-                    in_channels=fn_channels(cout), out_channels=cout, up=True, **block_kwargs
+                    in_channels=fn_channels(cout),
+                    out_channels=cout,
+                    up=True,
+                    **block_kwargs,
                 )
+            if (
+                hasattr(cfg.model, "extend_bottleneck")
+                and cfg.model.extend_bottleneck.enabled == True
+                and level != 0
+            ):
+                self.dec[f"{res}x{res}_reduce_dim"] = nn.Sequential(
+                    nn.Conv2d(768, fn_channels(cout) - cout, kernel_size=1),
+                    nn.BatchNorm2d(fn_channels(cout) - cout),
+                    nn.ReLU(inplace=True),
+                )
+                self._feats_res.append(res)
             for idx in range(num_blocks + 1):
                 cin = cout + skips.pop()
                 cout = model_channels * mult
@@ -688,7 +700,6 @@ class SongUNet(nn.Module):
                 )  # init_zero)
 
     def forward(self, x, feats=None, film_camera_emb=None, N_views_xa=1):
-
         emb = None
 
         if film_camera_emb is not None:
@@ -723,6 +734,8 @@ class SongUNet(nn.Module):
         # Decoder.
         aux = None
         tmp = None
+        if feats is not None:
+            feats = feats.permute(0, 3, 1, 2)
         for name, block in self.dec.items():
             if "aux_up" in name:
                 aux = block(aux, N_views_xa)
@@ -734,27 +747,30 @@ class SongUNet(nn.Module):
             elif "reduce_dim" in name:
                 pass
             else:
-                if ("in0" in name and "up" in name) and feats is not None:
+                # if "up" in name and feats is not None:
+                if ("in0" in name or "up" in name) and feats is not None:
                     assert self.cfg.model.extend_bottleneck.enabled == True
                     assert len(x.shape) == 4  # B C H W
 
                     res = name.find("x")
                     if res == -1:
                         # `in0` block present. Cannot extract resolution from name
-                        assert "in0" in name
+                        assert "in0" in name or "in1" in name
                         res = self._feats_res[0]
                     else:
                         res = int(name[:res])
+                    if not ("in0" in name or "in1" in name):
+                        # in0 and in1 are the first blocks, we cannot half the resolution
+                        res //= 2
 
-                    feats = feats.permute(0, 3, 1, 2)
-                    feats = self.dec[f"{res}x{res}_reduce_dim"](feats)
-                    feats = F.interpolate(
-                        feats,
+                    _feats = self.dec[f"{res}x{res}_reduce_dim"](feats)
+                    _feats = F.interpolate(
+                        _feats,
                         size=(res, res),
                         mode="bilinear",
                         align_corners=True,
                     )
-                    x = torch.cat([x, feats], dim=1)
+                    x = torch.cat([x, _feats], dim=1)
                 if x.shape[1] != block.in_channels:
                     # skip connection is pixel-aligned which is good for
                     # foreground features
@@ -780,7 +796,10 @@ class SingleImageSongUNetPredictor(nn.Module):
             in_channels = cfg.model.input_channels
             emb_dim_in = 6 * cfg.cam_embd.dimension
 
-        if hasattr(cfg.model, "extend_bottleneck") and cfg.model.extend_bottleneck.enabled == True:
+        if (
+            hasattr(cfg.model, "extend_bottleneck")
+            and cfg.model.extend_bottleneck.enabled == True
+        ):
             self.feat_model = torch.hub.load(
                 cfg.model.extend_bottleneck.feats.repo,
                 cfg.model.extend_bottleneck.feats.model,
